@@ -1,0 +1,4931 @@
+{
+  "tools": [
+    {
+      "tool_id": "sys.time",
+      "name": "System Time",
+      "description": "Return the current system time in ISO format.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "iso": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "iso"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "time"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {},
+          "output": {
+            "iso": "2026-01-23T12:34:56Z"
+          }
+        }
+      ],
+      "timeouts_ms": 1000,
+      "resource_limits": {
+        "cpu_ms": 50,
+        "mem_mb": 16
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "math.eval",
+      "name": "Math Eval",
+      "description": "Safely evaluate a math expression.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "expr": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expr"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "math"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {
+            "expr": "2+2"
+          },
+          "output": {
+            "value": 4
+          }
+        }
+      ],
+      "timeouts_ms": 1000,
+      "resource_limits": {
+        "cpu_ms": 100,
+        "mem_mb": 16
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "fs.read_file",
+      "name": "Read File",
+      "description": "Read a text file from the workspace. Paths can be relative (e.g., 'file.txt' or 'data/file.txt') or workspace-rooted format (e.g., 'workspace:/file.txt'). Both formats are handled automatically.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "fs"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {
+            "path": "workspace:/README.md"
+          },
+          "output": {
+            "content": "..."
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 32
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "fs.write_file",
+      "name": "Write File",
+      "description": "Write a text file to the workspace. Paths can be relative (e.g., 'file.txt' or 'data/file.txt') or workspace-rooted format (e.g., 'workspace:/file.txt'). Both formats are handled automatically.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "bytes_written": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bytes_written"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "fs"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [
+        {
+          "input": {
+            "path": "workspace:/notes/todo.md",
+            "content": "hello"
+          },
+          "output": {
+            "bytes_written": 5
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "write"
+      }
+    },
+    {
+      "tool_id": "image.analyse",
+      "name": "Image Analyse",
+      "description": "Analyse an image and return a structured summary, direct answer, OCR text, and detected objects.",
+      "version": "2.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "image_ref": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "image_ref"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "image_ref": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "answer": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "objects": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "image_ref",
+          "summary",
+          "answer",
+          "text",
+          "objects"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "vision",
+        "video"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {
+            "image_ref": "workspace:/images/sample.png",
+            "question": "What is the text on the sign?"
+          },
+          "output": {
+            "image_ref": "workspace:/images/sample.png",
+            "summary": "...",
+            "answer": "...",
+            "text": "",
+            "objects": []
+          }
+        }
+      ],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 500,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "video.analyse",
+      "name": "Video Analyse",
+      "description": "Analyse a video by adaptively sampling frames over time, transcribing audio, and returning a structured summary, direct answer, OCR text, detected objects, transcript, and a keyframe timeline.",
+      "version": "1.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "video_ref": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          },
+          "start_s": {
+            "type": "number"
+          },
+          "end_s": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "video_ref"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "video_ref": {
+            "type": "string"
+          },
+          "duration_s": {
+            "type": "number"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "answer": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "transcript": {
+            "type": "string"
+          },
+          "objects": {
+            "type": "array"
+          },
+          "keyframes": {
+            "type": "array"
+          },
+          "scenes": {
+            "type": "array"
+          },
+          "events": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "video_ref",
+          "duration_s",
+          "summary",
+          "answer",
+          "text",
+          "transcript",
+          "objects",
+          "keyframes",
+          "scenes",
+          "events"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "vision",
+        "video"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {
+            "video_ref": "workspace:/videos/sample.mp4",
+            "question": "What happens in this clip?"
+          },
+          "output": {
+            "video_ref": "workspace:/videos/sample.mp4",
+            "duration_s": 12.4,
+            "summary": "...",
+            "answer": "...",
+            "text": "",
+            "transcript": "Speaker says hello and points to a chart.",
+            "objects": [],
+            "keyframes": [],
+            "scenes": [],
+            "events": []
+          }
+        }
+      ],
+      "timeouts_ms": 20000,
+      "resource_limits": {
+        "cpu_ms": 2000,
+        "mem_mb": 512
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "vision.observe",
+      "name": "Vision Observe",
+      "description": "Observe the live vision broker state by analyzing the latest, stable, recent, or watched camera frames without reopening the camera.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "analysis_mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "image",
+              "video"
+            ]
+          },
+          "time_scope": {
+            "type": "string",
+            "enum": [
+              "now",
+              "latest",
+              "stable",
+              "recent",
+              "watch"
+            ]
+          },
+          "lookback_s": {
+            "type": "number"
+          },
+          "max_duration_s": {
+            "type": "number"
+          },
+          "sample_count": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "time_scope": {
+            "type": "string"
+          },
+          "analysis_mode": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "answer": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "objects": {
+            "type": "array"
+          },
+          "frames": {
+            "type": "array"
+          },
+          "video_ref": {
+            "type": "string"
+          },
+          "scene": {
+            "type": "object"
+          },
+          "sampling": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "ok",
+          "time_scope",
+          "analysis_mode",
+          "summary",
+          "answer",
+          "text",
+          "objects",
+          "frames",
+          "scene",
+          "sampling"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "vision"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {
+            "question": "Read the text in front of you.",
+            "analysis_mode": "auto",
+            "time_scope": "now"
+          },
+          "output": {
+            "ok": true,
+            "time_scope": "now",
+            "analysis_mode": "image",
+            "summary": "...",
+            "answer": "...",
+            "text": "",
+            "objects": [],
+            "frames": [],
+            "scene": {},
+            "sampling": {}
+          }
+        },
+        {
+          "input": {
+            "question": "What just changed?",
+            "analysis_mode": "auto",
+            "time_scope": "recent",
+            "lookback_s": 6,
+            "sample_count": 4
+          },
+          "output": {
+            "ok": true,
+            "time_scope": "recent",
+            "analysis_mode": "video",
+            "summary": "...",
+            "answer": "...",
+            "text": "",
+            "objects": [],
+            "frames": [],
+            "scene": {},
+            "sampling": {}
+          }
+        }
+      ],
+      "timeouts_ms": 20000,
+      "resource_limits": {
+        "cpu_ms": 1500,
+        "mem_mb": 512
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "ui.predict_coords",
+      "name": "UI Predict Coordinates",
+      "description": "Run UI grounding over an image and return the raw JSON from the model.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "image_ref": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "image_ref",
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "image_ref": {
+            "type": "string"
+          },
+          "json": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ],
+            "additionalProperties": true
+          },
+          "raw_text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "image_ref",
+          "json"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "vision",
+        "ui"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {
+            "image_ref": "workspace:/screenshots/screen.png",
+            "query": "like button"
+          },
+          "output": {
+            "image_ref": "workspace:/screenshots/screen.png",
+            "json": {
+              "x": 420,
+              "y": 810
+            }
+          }
+        }
+      ],
+      "timeouts_ms": 6000,
+      "resource_limits": {
+        "cpu_ms": 500,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "math.sympy",
+      "name": "SymPy Evaluate",
+      "description": "Evaluate and simplify symbolic math expressions using SymPy.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "expr": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expr"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result": {
+            "type": "string"
+          },
+          "latex": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "latex"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "math"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {
+            "expr": "integrate(x**2, x)"
+          },
+          "output": {
+            "result": "x**3/3",
+            "latex": "x^{3}/3"
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "fs.list_dir",
+      "name": "List Directory",
+      "description": "List files and directories under a workspace path.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "entries": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "entries"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "fs"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {
+            "path": "workspace:/"
+          },
+          "output": {
+            "entries": [
+              {
+                "name": "src",
+                "is_dir": true
+              }
+            ]
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "fs.delete",
+      "name": "Delete Path",
+      "description": "Delete a file or directory inside the workspace.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "recursive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "deleted",
+          "path"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "fs"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [
+        {
+          "input": {
+            "path": "workspace:/tmp/file.txt"
+          },
+          "output": {
+            "deleted": true,
+            "path": "workspace:/tmp/file.txt"
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "write"
+      }
+    },
+    {
+      "tool_id": "fs.move",
+      "name": "Move Path",
+      "description": "Move or rename a file or directory inside the workspace.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "src": {
+            "type": "string"
+          },
+          "dst": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "src",
+          "dst"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "moved": {
+            "type": "boolean"
+          },
+          "src": {
+            "type": "string"
+          },
+          "dst": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "moved",
+          "src",
+          "dst"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "fs"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [
+        {
+          "input": {
+            "src": "workspace:/a.txt",
+            "dst": "workspace:/b.txt"
+          },
+          "output": {
+            "moved": true,
+            "src": "workspace:/a.txt",
+            "dst": "workspace:/b.txt"
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "write"
+      }
+    },
+    {
+      "tool_id": "fs.copy",
+      "name": "Copy Path",
+      "description": "Copy a file or directory inside the workspace.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "src": {
+            "type": "string"
+          },
+          "dst": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "src",
+          "dst"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "copied": {
+            "type": "boolean"
+          },
+          "src": {
+            "type": "string"
+          },
+          "dst": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "copied",
+          "src",
+          "dst"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "fs"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [
+        {
+          "input": {
+            "src": "workspace:/a.txt",
+            "dst": "workspace:/b.txt"
+          },
+          "output": {
+            "copied": true,
+            "src": "workspace:/a.txt",
+            "dst": "workspace:/b.txt"
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "write"
+      }
+    },
+    {
+      "tool_id": "fs.mkdir",
+      "name": "Make Directory",
+      "description": "Create a directory inside the workspace. Paths can be relative (e.g., 'tmp' or 'data/subdir') or workspace-rooted format (e.g., 'workspace:/tmp'). Both formats are handled automatically.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "created": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "created",
+          "path"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "fs"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [
+        {
+          "input": {
+            "path": "workspace:/tmp"
+          },
+          "output": {
+            "created": true,
+            "path": "workspace:/tmp"
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "write"
+      }
+    },
+    {
+      "tool_id": "net.search",
+      "name": "Web Search (SearXNG)",
+      "description": "Search the web using a SearXNG instance.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "max_results": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "results": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "query",
+          "results"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "network"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [
+        {
+          "input": {
+            "query": "latest python release"
+          },
+          "output": {
+            "query": "latest python release",
+            "results": []
+          }
+        }
+      ],
+      "timeouts_ms": 10000,
+      "resource_limits": {
+        "cpu_ms": 500,
+        "mem_mb": 128
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "ui.screenshot",
+      "name": "UI Screenshot",
+      "description": "Capture a screenshot (full screen or region) and save to workspace.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "region": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer"
+              },
+              "y": {
+                "type": "integer"
+              },
+              "width": {
+                "type": "integer"
+              },
+              "height": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "image_ref": {
+            "type": "string"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "image_ref",
+          "width",
+          "height"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "ui"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "region": {
+              "x": 0,
+              "y": 0,
+              "width": 800,
+              "height": 600
+            }
+          },
+          "output": {
+            "image_ref": "workspace:/screenshots/shot.png",
+            "width": 800,
+            "height": 600
+          }
+        }
+      ],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 500,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "write"
+      }
+    },
+    {
+      "tool_id": "ui.click",
+      "name": "UI Click",
+      "description": "Click at screen coordinates.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          },
+          "button": {
+            "type": "string"
+          },
+          "clicks": {
+            "type": "integer"
+          },
+          "interval": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "clicked": {
+            "type": "boolean"
+          },
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "clicked",
+          "x",
+          "y"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "x": 100,
+            "y": 200
+          },
+          "output": {
+            "clicked": true,
+            "x": 100,
+            "y": 200
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "ui.move",
+      "name": "UI Move",
+      "description": "Move the mouse to coordinates.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          },
+          "duration": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "moved": {
+            "type": "boolean"
+          },
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "moved",
+          "x",
+          "y"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "x": 100,
+            "y": 200,
+            "duration": 0.2
+          },
+          "output": {
+            "moved": true,
+            "x": 100,
+            "y": 200
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "ui.drag",
+      "name": "UI Drag",
+      "description": "Drag the mouse from start to end coordinates.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer"
+              },
+              "y": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          },
+          "end": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer"
+              },
+              "y": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          },
+          "duration": {
+            "type": "number"
+          },
+          "button": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "dragged": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dragged"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "start": {
+              "x": 100,
+              "y": 200
+            },
+            "end": {
+              "x": 300,
+              "y": 200
+            }
+          },
+          "output": {
+            "dragged": true
+          }
+        }
+      ],
+      "timeouts_ms": 3000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "ui.type",
+      "name": "UI Type",
+      "description": "Type text at the current cursor focus.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "interval": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "typed": {
+            "type": "boolean"
+          },
+          "chars": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "typed",
+          "chars"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "text": "hello"
+          },
+          "output": {
+            "typed": true,
+            "chars": 5
+          }
+        }
+      ],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "ui.hotkey",
+      "name": "UI Hotkey",
+      "description": "Press a hotkey combo.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "keys"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "hotkey": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "hotkey"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "keys": [
+              "alt",
+              "f4"
+            ]
+          },
+          "output": {
+            "hotkey": [
+              "alt",
+              "f4"
+            ]
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "ui.scroll",
+      "name": "UI Scroll",
+      "description": "Scroll the mouse wheel by amount.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "amount": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "amount"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "scrolled": {
+            "type": "boolean"
+          },
+          "amount": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scrolled",
+          "amount"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "amount": -500
+          },
+          "output": {
+            "scrolled": true,
+            "amount": -500
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "ui.focus_window",
+      "name": "UI Focus Window",
+      "description": "Focus a window whose title contains the given text.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "focused": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "focused"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "title": "Chrome"
+          },
+          "output": {
+            "focused": true,
+            "title": "Chrome"
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "ui.list_applications",
+      "name": "UI List Applications",
+      "description": "List desktop applications that are explicitly allowlisted for launch on the current host.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "platform": {
+            "type": "string"
+          },
+          "catalog_path": {
+            "type": "string"
+          },
+          "catalog_exists": {
+            "type": "boolean"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "applications": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "app_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "aliases": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "app_id",
+                "name",
+                "description",
+                "aliases"
+              ]
+            }
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "catalog_path",
+          "catalog_exists",
+          "count",
+          "applications"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "ui",
+        "applications"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {},
+          "output": {
+            "platform": "wsl",
+            "catalog_path": "workspace:/config/app_launchers.json",
+            "catalog_exists": true,
+            "count": 2,
+            "applications": [
+              {
+                "app_id": "notepad",
+                "name": "Notepad",
+                "description": "Windows text editor.",
+                "aliases": [
+                  "text_editor"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "timeouts_ms": 1000,
+      "resource_limits": {
+        "cpu_ms": 100,
+        "mem_mb": 32
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "ui.open_application",
+      "name": "UI Open Application",
+      "description": "Launch an explicitly allowlisted desktop application by app_id.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "app_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "app_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "launched": {
+            "type": "boolean"
+          },
+          "pid": {
+            "type": "integer"
+          },
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "app_id",
+          "name",
+          "platform",
+          "launched"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "ui",
+        "applications"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "app_id": "notepad"
+          },
+          "output": {
+            "app_id": "notepad",
+            "name": "Notepad",
+            "platform": "wsl",
+            "launched": true
+          }
+        }
+      ],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 300,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "embodiment.describe_host",
+      "name": "Embodiment Describe Host",
+      "description": "Discover the current host, peripherals, and normalized embodiment capabilities.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "type": "object"
+          },
+          "devices": {
+            "type": "array"
+          },
+          "capabilities": {
+            "type": "array"
+          },
+          "summary": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "host",
+          "devices",
+          "capabilities",
+          "summary"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "embodiment",
+        "hardware"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {},
+          "output": {
+            "host": {
+              "host_id": "host:local"
+            },
+            "devices": [],
+            "capabilities": [],
+            "summary": {
+              "device_count": 0,
+              "capability_count": 0
+            }
+          }
+        }
+      ],
+      "timeouts_ms": 3000,
+      "resource_limits": {
+        "cpu_ms": 300,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "embodiment.list_capabilities",
+      "name": "Embodiment List Capabilities",
+      "description": "List normalized host capabilities, their safety classes, and their mapped tools.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "host_id": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": "array"
+          },
+          "summary": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "host_id",
+          "capabilities",
+          "summary"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "embodiment",
+        "hardware"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {},
+          "output": {
+            "host_id": "host:local",
+            "capabilities": [],
+            "summary": {
+              "capability_count": 0
+            }
+          }
+        }
+      ],
+      "timeouts_ms": 3000,
+      "resource_limits": {
+        "cpu_ms": 300,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "embodiment.get_state",
+      "name": "Embodiment Get State",
+      "description": "Return lightweight current host state such as screen, audio, power, network, and robot connectivity.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "host_id": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "string"
+          },
+          "interface_mode": {
+            "type": "string"
+          },
+          "headless": {
+            "type": "boolean"
+          },
+          "screen": {
+            "type": "object"
+          },
+          "audio": {
+            "type": "object"
+          },
+          "vision": {
+            "type": "object"
+          },
+          "power": {
+            "type": "object"
+          },
+          "network": {
+            "type": "object"
+          },
+          "robot": {
+            "type": "object"
+          },
+          "capability_summary": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "host_id",
+          "ts",
+          "interface_mode",
+          "headless",
+          "screen",
+          "audio",
+          "vision",
+          "power",
+          "network",
+          "robot",
+          "capability_summary"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "embodiment",
+        "hardware"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {},
+          "output": {
+            "host_id": "host:local",
+            "ts": "2026-03-18T00:00:00Z",
+            "interface_mode": "local",
+            "headless": false,
+            "screen": {},
+            "audio": {},
+            "vision": {},
+            "power": {},
+            "network": {},
+            "robot": {
+              "detected": false
+            },
+            "capability_summary": {
+              "capability_count": 0
+            }
+          }
+        }
+      ],
+      "timeouts_ms": 3000,
+      "resource_limits": {
+        "cpu_ms": 300,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "embodiment.screen_capture",
+      "name": "Embodiment Screen Capture",
+      "description": "Capture the current screen through the embodiment desktop adapter and save it to the workspace.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "region": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer"
+              },
+              "y": {
+                "type": "integer"
+              },
+              "width": {
+                "type": "integer"
+              },
+              "height": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "image_ref": {
+            "type": "string"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "image_ref",
+          "width",
+          "height"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "embodiment",
+        "ui"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {},
+          "output": {
+            "image_ref": "workspace:/screenshots/screenshot.png",
+            "width": 1920,
+            "height": 1080
+          }
+        }
+      ],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 500,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "write"
+      }
+    },
+    {
+      "tool_id": "embodiment.pointer_click",
+      "name": "Embodiment Pointer Click",
+      "description": "Click the desktop pointer through the embodiment desktop adapter.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          },
+          "button": {
+            "type": "string"
+          },
+          "clicks": {
+            "type": "integer"
+          },
+          "interval": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "clicked": {
+            "type": "boolean"
+          },
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "clicked",
+          "x",
+          "y"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "embodiment",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "x": 100,
+            "y": 200
+          },
+          "output": {
+            "clicked": true,
+            "x": 100,
+            "y": 200
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "embodiment.keyboard_type",
+      "name": "Embodiment Keyboard Type",
+      "description": "Type text through the embodiment desktop adapter.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "interval": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "typed": {
+            "type": "boolean"
+          },
+          "chars": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "typed",
+          "chars"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "embodiment",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "text": "hello"
+          },
+          "output": {
+            "typed": true,
+            "chars": 5
+          }
+        }
+      ],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "embodiment.window_focus",
+      "name": "Embodiment Window Focus",
+      "description": "Focus a desktop window through the embodiment desktop adapter.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "focused": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "focused"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "embodiment",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "title": "Browser"
+          },
+          "output": {
+            "focused": true,
+            "title": "Browser"
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "embodiment.camera_capture",
+      "name": "Embodiment Camera Capture",
+      "description": "Capture a single camera frame through the embodiment camera adapter and save it to the workspace.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "camera_index": {
+            "type": "integer"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "image_ref": {
+            "type": "string"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "camera_index": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "image_ref",
+          "width",
+          "height",
+          "camera_index"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "embodiment",
+        "camera"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [
+        {
+          "input": {
+            "camera_index": 0
+          },
+          "output": {
+            "image_ref": "workspace:/camera/frame.jpg",
+            "width": 1280,
+            "height": 720,
+            "camera_index": 0
+          }
+        }
+      ],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 500,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "write"
+      }
+    },
+    {
+      "tool_id": "embodiment.list_fallbacks",
+      "name": "Embodiment List Fallbacks",
+      "description": "Return LLM-codegen fallback candidates for embodiment capabilities that are detected but do not have an available explicit low-level implementation.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "host_id": {
+            "type": "string"
+          },
+          "fallbacks": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "host_id",
+          "fallbacks"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "embodiment"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {},
+          "output": {
+            "host_id": "host:local",
+            "fallbacks": []
+          }
+        }
+      ],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "embodiment.phone_screen_capture",
+      "name": "Embodiment Phone Screen Capture",
+      "description": "Capture the current screen from a connected Android phone through the explicit phone adapter and save it to the workspace.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "serial": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "image_ref": {
+            "type": "string"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "serial": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "image_ref"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "embodiment",
+        "phone",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {},
+          "output": {
+            "image_ref": "workspace:/phone/screenshot.png",
+            "width": 1080,
+            "height": 2400
+          }
+        }
+      ],
+      "timeouts_ms": 10000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "write"
+      }
+    },
+    {
+      "tool_id": "embodiment.phone_tap",
+      "name": "Embodiment Phone Tap",
+      "description": "Tap coordinates on a connected Android phone through the explicit phone adapter.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "serial": {
+            "type": "string"
+          },
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "tapped": {
+            "type": "boolean"
+          },
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tapped"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "embodiment",
+        "phone",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "x": 100,
+            "y": 200
+          },
+          "output": {
+            "tapped": true,
+            "x": 100,
+            "y": 200
+          }
+        }
+      ],
+      "timeouts_ms": 4000,
+      "resource_limits": {
+        "cpu_ms": 300,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "embodiment.phone_swipe",
+      "name": "Embodiment Phone Swipe",
+      "description": "Swipe between two points on a connected Android phone through the explicit phone adapter.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "serial": {
+            "type": "string"
+          },
+          "start": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer"
+              },
+              "y": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          },
+          "end": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer"
+              },
+              "y": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          },
+          "duration_ms": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "swiped": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "swiped"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "embodiment",
+        "phone",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "start": {
+              "x": 100,
+              "y": 300
+            },
+            "end": {
+              "x": 100,
+              "y": 900
+            }
+          },
+          "output": {
+            "swiped": true
+          }
+        }
+      ],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 300,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "embodiment.phone_type",
+      "name": "Embodiment Phone Type",
+      "description": "Type text on a connected Android phone through the explicit phone adapter.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "serial": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "typed": {
+            "type": "boolean"
+          },
+          "chars": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "typed"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "embodiment",
+        "phone",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "text": "hello"
+          },
+          "output": {
+            "typed": true,
+            "chars": 5
+          }
+        }
+      ],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 300,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "embodiment.phone_launch_app",
+      "name": "Embodiment Phone Launch App",
+      "description": "Launch or focus an app on a connected Android phone through the explicit phone adapter.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "serial": {
+            "type": "string"
+          },
+          "package": {
+            "type": "string"
+          },
+          "activity": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "package"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "launched": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "launched"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "embodiment",
+        "phone",
+        "ui"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "package": "com.android.settings"
+          },
+          "output": {
+            "launched": true
+          }
+        }
+      ],
+      "timeouts_ms": 8000,
+      "resource_limits": {
+        "cpu_ms": 500,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "embodiment.robot_get_state",
+      "name": "Embodiment Robot Get State",
+      "description": "Return the current detected robot transport, topics, and bridge availability through the explicit robot adapter.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "detected": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "detected"
+        ]
+      },
+      "capabilities": [
+        "read",
+        "embodiment",
+        "robot"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [
+        {
+          "input": {},
+          "output": {
+            "detected": false
+          }
+        }
+      ],
+      "timeouts_ms": 3000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "embodiment.robot_move_joint",
+      "name": "Embodiment Robot Move Joint",
+      "description": "Send a single joint target command to the detected robot controller through the explicit robot adapter.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "joint": {
+            "type": "string"
+          },
+          "position": {
+            "type": "number"
+          },
+          "velocity": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "joint",
+          "position"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "queued": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "queued"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "embodiment",
+        "robot"
+      ],
+      "risk_level_default": "VERY_HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "joint": "shoulder_pan",
+            "position": 1.2
+          },
+          "output": {
+            "queued": true
+          }
+        }
+      ],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 300,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "embodiment.robot_set_gripper",
+      "name": "Embodiment Robot Set Gripper",
+      "description": "Send a gripper command to the detected robot controller through the explicit robot adapter.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string"
+          },
+          "width": {
+            "type": "number"
+          },
+          "force": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "queued": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "queued"
+        ]
+      },
+      "capabilities": [
+        "write",
+        "embodiment",
+        "robot"
+      ],
+      "risk_level_default": "VERY_HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [
+        {
+          "input": {
+            "state": "open"
+          },
+          "output": {
+            "queued": true
+          }
+        }
+      ],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 300,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "google.status",
+      "name": "Google Status",
+      "description": "Inspect Google Workspace OAuth configuration and authorized scope bundles.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "account_name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "account_name": {
+            "type": "string"
+          },
+          "bundles": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "configured",
+          "account_name",
+          "bundles"
+        ]
+      },
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-oauthlib",
+        "keyring"
+      ],
+      "capabilities": [
+        "read",
+        "google",
+        "network"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 500,
+        "mem_mb": 128
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "none"
+      },
+      "log_policy": {
+        "redact_args": true,
+        "redact_result": true,
+        "redact_io": true
+      }
+    },
+    {
+      "tool_id": "google.authorize",
+      "name": "Google Authorize",
+      "description": "Run the installed-app OAuth flow for a predefined Google scope bundle.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bundle": {
+            "type": "string"
+          },
+          "account_name": {
+            "type": "string"
+          },
+          "force_reconsent": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "bundle"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "authorized": {
+            "type": "boolean"
+          },
+          "account_name": {
+            "type": "string"
+          },
+          "bundle": {
+            "type": "string"
+          },
+          "scopes": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "authorized",
+          "account_name",
+          "bundle",
+          "scopes"
+        ]
+      },
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-oauthlib",
+        "keyring"
+      ],
+      "capabilities": [
+        "write",
+        "google",
+        "network"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [],
+      "timeouts_ms": 120000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "none"
+      },
+      "log_policy": {
+        "redact_args": true,
+        "redact_result": true,
+        "redact_io": true
+      }
+    },
+    {
+      "tool_id": "google.disconnect",
+      "name": "Google Disconnect",
+      "description": "Remove locally stored OAuth credentials for one Google bundle or all bundles.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bundle": {
+            "type": "string"
+          },
+          "account_name": {
+            "type": "string"
+          },
+          "revoke": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "account_name": {
+            "type": "string"
+          },
+          "removed_bundles": {
+            "type": "array"
+          },
+          "revoked_bundles": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "account_name",
+          "removed_bundles",
+          "revoked_bundles"
+        ]
+      },
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-oauthlib",
+        "keyring"
+      ],
+      "capabilities": [
+        "write",
+        "google",
+        "network"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [],
+      "timeouts_ms": 10000,
+      "resource_limits": {
+        "cpu_ms": 500,
+        "mem_mb": 128
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "none"
+      },
+      "log_policy": {
+        "redact_args": true,
+        "redact_result": true,
+        "redact_io": true
+      }
+    },
+    {
+      "tool_id": "google.gmail.list_messages",
+      "name": "Google Gmail List Messages",
+      "description": "List Gmail messages matching a search query.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "account_name": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "label_ids": {
+            "type": "array"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "messages": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "messages"
+        ]
+      },
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-oauthlib",
+        "keyring"
+      ],
+      "capabilities": [
+        "read",
+        "google",
+        "network",
+        "email"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "none"
+      },
+      "log_policy": {
+        "redact_args": true,
+        "redact_result": true,
+        "redact_io": true
+      }
+    },
+    {
+      "tool_id": "google.gmail.get_message",
+      "name": "Google Gmail Get Message",
+      "description": "Fetch a Gmail message by id.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "account_name": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "body_text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-oauthlib",
+        "keyring"
+      ],
+      "capabilities": [
+        "read",
+        "google",
+        "network",
+        "email"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "none"
+      },
+      "log_policy": {
+        "redact_args": true,
+        "redact_result": true,
+        "redact_io": true
+      }
+    },
+    {
+      "tool_id": "google.gmail.create_draft",
+      "name": "Google Gmail Create Draft",
+      "description": "Create a Gmail draft message.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "account_name": {
+            "type": "string"
+          },
+          "to": {
+            "type": [
+              "array",
+              "string"
+            ]
+          },
+          "cc": {
+            "type": [
+              "array",
+              "string"
+            ]
+          },
+          "bcc": {
+            "type": [
+              "array",
+              "string"
+            ]
+          },
+          "subject": {
+            "type": "string"
+          },
+          "body_text": {
+            "type": "string"
+          },
+          "body_html": {
+            "type": "string"
+          },
+          "reply_to_message_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "to",
+          "subject"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "draft_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "draft_id"
+        ]
+      },
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-oauthlib",
+        "keyring"
+      ],
+      "capabilities": [
+        "write",
+        "google",
+        "network",
+        "email"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "none"
+      },
+      "log_policy": {
+        "redact_args": true,
+        "redact_result": true,
+        "redact_io": true
+      }
+    },
+    {
+      "tool_id": "google.gmail.send_message",
+      "name": "Google Gmail Send Message",
+      "description": "Send an email through Gmail.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "account_name": {
+            "type": "string"
+          },
+          "to": {
+            "type": [
+              "array",
+              "string"
+            ]
+          },
+          "cc": {
+            "type": [
+              "array",
+              "string"
+            ]
+          },
+          "bcc": {
+            "type": [
+              "array",
+              "string"
+            ]
+          },
+          "subject": {
+            "type": "string"
+          },
+          "body_text": {
+            "type": "string"
+          },
+          "body_html": {
+            "type": "string"
+          },
+          "reply_to_message_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "to",
+          "subject"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "message_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id"
+        ]
+      },
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-oauthlib",
+        "keyring"
+      ],
+      "capabilities": [
+        "write",
+        "google",
+        "network",
+        "email"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "none"
+      },
+      "log_policy": {
+        "redact_args": true,
+        "redact_result": true,
+        "redact_io": true
+      }
+    },
+    {
+      "tool_id": "google.calendar.list_events",
+      "name": "Google Calendar List Events",
+      "description": "List Google Calendar events from a calendar.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "account_name": {
+            "type": "string"
+          },
+          "calendar_id": {
+            "type": "string"
+          },
+          "time_min": {
+            "type": "string"
+          },
+          "time_max": {
+            "type": "string"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "events"
+        ]
+      },
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-oauthlib",
+        "keyring"
+      ],
+      "capabilities": [
+        "read",
+        "google",
+        "network",
+        "calendar"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "none"
+      },
+      "log_policy": {
+        "redact_args": true,
+        "redact_result": true,
+        "redact_io": true
+      }
+    },
+    {
+      "tool_id": "google.calendar.create_event",
+      "name": "Google Calendar Create Event",
+      "description": "Create an event in Google Calendar.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "account_name": {
+            "type": "string"
+          },
+          "calendar_id": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "start": {
+            "type": [
+              "object",
+              "string"
+            ]
+          },
+          "end": {
+            "type": [
+              "object",
+              "string"
+            ]
+          },
+          "attendees": {
+            "type": "array"
+          },
+          "send_updates": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary",
+          "start",
+          "end"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-oauthlib",
+        "keyring"
+      ],
+      "capabilities": [
+        "write",
+        "google",
+        "network",
+        "calendar"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "none"
+      },
+      "log_policy": {
+        "redact_args": true,
+        "redact_result": true,
+        "redact_io": true
+      }
+    },
+    {
+      "tool_id": "google.docs.get_document",
+      "name": "Google Docs Get Document",
+      "description": "Read a Google Docs document by document id.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "account_name": {
+            "type": "string"
+          },
+          "document_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_id",
+          "text"
+        ]
+      },
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-oauthlib",
+        "keyring"
+      ],
+      "capabilities": [
+        "read",
+        "google",
+        "network",
+        "docs"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "none"
+      },
+      "log_policy": {
+        "redact_args": true,
+        "redact_result": true,
+        "redact_io": true
+      }
+    },
+    {
+      "tool_id": "google.docs.create_document",
+      "name": "Google Docs Create Document",
+      "description": "Create a Google Docs document and optionally seed it with content.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "account_name": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-oauthlib",
+        "keyring"
+      ],
+      "capabilities": [
+        "write",
+        "google",
+        "network",
+        "docs"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "none"
+      },
+      "log_policy": {
+        "redact_args": true,
+        "redact_result": true,
+        "redact_io": true
+      }
+    },
+    {
+      "tool_id": "google.docs.append_text",
+      "name": "Google Docs Append Text",
+      "description": "Append text to the end of a Google Docs document.",
+      "version": "0.1.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "account_name": {
+            "type": "string"
+          },
+          "document_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_id",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-oauthlib",
+        "keyring"
+      ],
+      "capabilities": [
+        "write",
+        "google",
+        "network",
+        "docs"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "none"
+      },
+      "log_policy": {
+        "redact_args": true,
+        "redact_result": true,
+        "redact_io": true
+      }
+    },
+    {
+      "tool_id": "sys.list_tools",
+      "name": "List Tools",
+      "description": "List the currently registered tools and their metadata.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "count",
+          "tools"
+        ]
+      },
+      "dependencies": [],
+      "capabilities": [
+        "read",
+        "tools",
+        "introspection"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [],
+      "timeouts_ms": 1000,
+      "resource_limits": {
+        "cpu_ms": 50,
+        "mem_mb": 32
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "fs.stat",
+      "name": "File Stat",
+      "description": "Inspect whether a workspace path exists and return basic metadata. Paths can be relative (e.g., 'file.txt' or 'data/subdir') or workspace-rooted format (e.g., 'workspace:/file.txt'). Both formats are handled automatically.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "exists": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "is_dir": {
+            "type": "boolean"
+          },
+          "is_file": {
+            "type": "boolean"
+          },
+          "size_bytes": {
+            "type": "integer"
+          },
+          "modified_iso": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "exists"
+        ]
+      },
+      "dependencies": [],
+      "capabilities": [
+        "read",
+        "fs",
+        "metadata"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [],
+      "timeouts_ms": 1000,
+      "resource_limits": {
+        "cpu_ms": 100,
+        "mem_mb": 32
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "fs.find",
+      "name": "Find Files",
+      "description": "Search the workspace tree by glob and optional regex filters.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "regex": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "any",
+              "file",
+              "dir"
+            ]
+          },
+          "case_sensitive": {
+            "type": "boolean"
+          },
+          "max_results": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "root",
+          "count",
+          "entries"
+        ]
+      },
+      "dependencies": [],
+      "capabilities": [
+        "read",
+        "fs",
+        "search"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [],
+      "timeouts_ms": 3000,
+      "resource_limits": {
+        "cpu_ms": 500,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "fs.search_text",
+      "name": "Search Text",
+      "description": "Search text content within workspace files and return matching lines.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "file_glob": {
+            "type": "string"
+          },
+          "case_sensitive": {
+            "type": "boolean"
+          },
+          "max_matches": {
+            "type": "integer"
+          },
+          "max_file_bytes": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "matches": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "query",
+          "count",
+          "matches"
+        ]
+      },
+      "dependencies": [],
+      "capabilities": [
+        "read",
+        "fs",
+        "search",
+        "text"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 128
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "data.json_query",
+      "name": "JSON Query",
+      "description": "Read a JSON file and optionally resolve a JSON Pointer within it.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "pointer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "pointer": {
+            "type": "string"
+          },
+          "found": {
+            "type": "boolean"
+          },
+          "value": {}
+        },
+        "required": [
+          "path",
+          "pointer",
+          "found"
+        ]
+      },
+      "dependencies": [],
+      "capabilities": [
+        "read",
+        "data",
+        "json"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "data.csv_read",
+      "name": "CSV Read",
+      "description": "Read rows from a CSV file in the workspace.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "delimiter": {
+            "type": "string"
+          },
+          "max_rows": {
+            "type": "integer"
+          },
+          "has_header": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "row_count": {
+            "type": "integer"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "path",
+          "columns",
+          "row_count",
+          "rows"
+        ]
+      },
+      "dependencies": [],
+      "capabilities": [
+        "read",
+        "data",
+        "csv"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [],
+      "timeouts_ms": 2000,
+      "resource_limits": {
+        "cpu_ms": 200,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "archive.zip_create",
+      "name": "Create Zip Archive",
+      "description": "Create a zip archive from workspace files and directories.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "output_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sources"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "archive_path": {
+            "type": "string"
+          },
+          "entry_count": {
+            "type": "integer"
+          },
+          "size_bytes": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "archive_path",
+          "entry_count",
+          "size_bytes"
+        ]
+      },
+      "dependencies": [],
+      "capabilities": [
+        "write",
+        "archive",
+        "fs"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [],
+      "timeouts_ms": 10000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 128
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "write"
+      }
+    },
+    {
+      "tool_id": "archive.zip_extract",
+      "name": "Extract Zip Archive",
+      "description": "Extract a zip archive into the workspace with zip-slip protection.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "archive_path": {
+            "type": "string"
+          },
+          "output_dir": {
+            "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "archive_path"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "archive_path": {
+            "type": "string"
+          },
+          "output_dir": {
+            "type": "string"
+          },
+          "extracted_count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "archive_path",
+          "output_dir",
+          "extracted_count"
+        ]
+      },
+      "dependencies": [],
+      "capabilities": [
+        "write",
+        "archive",
+        "fs"
+      ],
+      "risk_level_default": "MEDIUM",
+      "required_permissions": [
+        "tier1"
+      ],
+      "examples": [],
+      "timeouts_ms": 10000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 128
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "write"
+      }
+    },
+    {
+      "tool_id": "http.request",
+      "name": "HTTP Request",
+      "description": "Perform an HTTP or HTTPS request and optionally save the response into the workspace.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "params": {
+            "type": "object"
+          },
+          "body_text": {
+            "type": "string"
+          },
+          "json_body": {
+            "type": "object"
+          },
+          "save_to_path": {
+            "type": "string"
+          },
+          "timeout_s": {
+            "type": "number"
+          },
+          "max_bytes": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "status_code": {
+            "type": "integer"
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "headers": {
+            "type": "object"
+          },
+          "response_bytes": {
+            "type": "integer"
+          },
+          "body_truncated": {
+            "type": "boolean"
+          },
+          "saved_to_path": {
+            "type": "string"
+          },
+          "body_text": {
+            "type": "string"
+          },
+          "body_base64": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "method",
+          "status_code",
+          "content_type",
+          "headers",
+          "response_bytes",
+          "body_truncated"
+        ]
+      },
+      "dependencies": [],
+      "capabilities": [
+        "network",
+        "http",
+        "api"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 30000,
+      "resource_limits": {
+        "cpu_ms": 2000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "write"
+      }
+    },
+    {
+      "tool_id": "git.status",
+      "name": "Git Status",
+      "description": "Return the current git branch summary and changed files for a workspace repository.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo_path": {
+            "type": "string"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "repo_path": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "change_count": {
+            "type": "integer"
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "repo_path",
+          "branch",
+          "change_count",
+          "changes"
+        ]
+      },
+      "dependencies": [
+        "git"
+      ],
+      "capabilities": [
+        "read",
+        "git"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 500,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "git.diff",
+      "name": "Git Diff",
+      "description": "Return a git diff for the workspace repository.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo_path": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "staged": {
+            "type": "boolean"
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "repo_path": {
+            "type": "string"
+          },
+          "diff": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_path",
+          "diff"
+        ]
+      },
+      "dependencies": [
+        "git"
+      ],
+      "capabilities": [
+        "read",
+        "git",
+        "diff"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [],
+      "timeouts_ms": 8000,
+      "resource_limits": {
+        "cpu_ms": 1000,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "git.log",
+      "name": "Git Log",
+      "description": "Return recent git commits for the workspace repository.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo_path": {
+            "type": "string"
+          },
+          "max_commits": {
+            "type": "integer"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "repo_path": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "commits": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "repo_path",
+          "count",
+          "commits"
+        ]
+      },
+      "dependencies": [
+        "git"
+      ],
+      "capabilities": [
+        "read",
+        "git",
+        "history"
+      ],
+      "risk_level_default": "LOW",
+      "required_permissions": [
+        "tier0"
+      ],
+      "examples": [],
+      "timeouts_ms": 5000,
+      "resource_limits": {
+        "cpu_ms": 500,
+        "mem_mb": 64
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "read"
+      }
+    },
+    {
+      "tool_id": "proc.exec",
+      "name": "Process Exec",
+      "description": "Execute a local process without a shell, capturing stdout and stderr.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "env": {
+            "type": "object"
+          },
+          "timeout_s": {
+            "type": "number"
+          },
+          "max_output_chars": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "returncode": {
+            "type": "integer"
+          },
+          "timed_out": {
+            "type": "boolean"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "stdout_truncated": {
+            "type": "boolean"
+          },
+          "stderr_truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "command",
+          "cwd",
+          "returncode",
+          "timed_out",
+          "stdout",
+          "stderr",
+          "stdout_truncated",
+          "stderr_truncated"
+        ]
+      },
+      "dependencies": [],
+      "capabilities": [
+        "execute",
+        "process",
+        "automation"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 30000,
+      "resource_limits": {
+        "cpu_ms": 5000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": true,
+        "fs": "write"
+      }
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "runs_dir": "reflection/runs",
+  "candidates_dir": "reflection/candidates",
+  "workspace_repo_dir": "reflection/workspace/repo",
+  "backend": "git_worktree",
+  "max_context_files": 10,
+  "max_file_chars": 12000,
+  "snippet_radius": 6,
+  "max_symbol_snippets": 10,
+  "max_edit_files": 6,
+  "max_diff_lines": 240,
+  "copy_ignore": [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "*.pyc",
+    "data",
+    "models",
+    "workspace",
+    "soul",
+    "evolve/base_models",
+    "evolve/output",
+    "evolve/runs",
+    "evolve/candidates",
+    "reflection/runs",
+    "reflection/candidates",
+    "reflection/workspace"
+  ]
+}

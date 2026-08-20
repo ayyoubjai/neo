@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "enabled": true,
+      "command": "python scripts/evolve_metric_runner.py --metric syntax --target {target_path} --repo-root {run_dir}",
+      "required": true,
+      "weight": 0.35,
+      "timeout_s": 120
+    },
+    {
+      "name": "tests",
+      "enabled": true,
+      "command": "python scripts/evolve_metric_runner.py --metric import --target {target_path} --repo-root {run_dir}",
+      "required": true,
+      "weight": 0.35,
+      "timeout_s": 120
+    },
+    {
+      "name": "safety",
+      "enabled": true,
+      "command": "python scripts/evolve_metric_runner.py --metric safety --target {target_path} --repo-root {run_dir} --baseline-root {repo_root}",
+      "required": false,
+      "weight": 0.15,
+      "timeout_s": 120
+    },
+    {
+      "name": "readability",
+      "enabled": true,
+      "command": "python scripts/evolve_metric_runner.py --metric readability --target {target_path} --repo-root {run_dir}",
+      "required": false,
+      "weight": 0.15,
+      "timeout_s": 120
+    },
+    {
+      "name": "macro",
+      "enabled": true,
+      "command": "python scripts/evolve_score.py --mode llm --macro-policy auto --auto-skip-no-input true --inject-tracing-if-missing true --trace-collect-window-s 300 --trace-poll-interval-s 5 --target {target_path} --target-start-line {target_start_line} --target-end-line {target_end_line} --repo-root {repo_root} --run-dir {run_dir} --trace-file evolve/scenarios/traces/current.jsonl --micro-scenarios-file evolve/scenarios/llm/current.json --min-cases 3 --min-correctness 0.95 --min-perf-ratio 0.95 --macro-weight 0.6 --micro-weight 0.4 --missing-source-policy neutral",
+      "parse_json": true,
+      "neutral_score_cap": 0.15,
+      "required": false,
+      "weight": 0.2,
+      "timeout_s": 300
+    }
+  ],
+  "benchmark": {
+    "enabled": false,
+    "name": "workload",
+    "command": "python -m pytest -q",
+    "required": false,
+    "weight": 0.0,
+    "timeout_s": 300,
+    "warmups": 1,
+    "runs": 5,
+    "min_ratio": 0.95,
+    "smaller_is_better": true
+  }
+}

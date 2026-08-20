@@ -1,0 +1,5 @@
+{
+  "complex_length": 180,
+  "tool_keywords": ["tool:", "run tool", "execute", "write file", "read file", "open file", "calc:", "calculate", "compute"],
+  "vision_keywords": ["screenshot", "photo", "image", "see this"]
+}

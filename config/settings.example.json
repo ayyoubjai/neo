@@ -1,0 +1,123 @@
+{
+  "workspace_root": ".",
+  "data_dir": "./data",
+  "rpc": {
+    "orch_host": "127.0.0.1",
+    "orch_port": 50051,
+    "tool_port": 50052,
+    "storage_port": 50053,
+    "model_port": 50054
+  },
+  "interface": {
+    "mode": "text",
+    "senses": ["text"],
+    "conversation_mode": "separate"
+  },
+  "models": {
+    "provider": "llamacpp",
+    "llamacpp_host": "http://127.0.0.1:8080",
+    "llamacpp_timeout_s": 600,
+    "ollama_host": "http://127.0.0.1:11434",
+    "ollama_timeout_s": 600,
+    "router_model": "qwen2.5-3b-instruct-q4_k_m.gguf",
+    "text_model": "qwen2.5-7b-instruct-q4_k_m.gguf",
+    "text_model_options": {"temperature": 0.2},
+    "vision_model": "",
+    "vision_model_options": {},
+    "embedding_model": "nomic-embed-text-v1.5-q4_k_m.gguf",
+    "text_enforce_json": false,
+    "text_use_thinking_on_empty": true
+  },
+  "orchestrator": {
+    "model_rpc_timeout_s": 600,
+    "auto_approve_all": false,
+    "retrieve_relevant_tools": true,
+    "select_relevant_tools": false,
+    "tool_retrieval_k": 8,
+    "memory_retrieval_k": 3,
+    "cognition_force_system": "",
+    "cognition_system0_model": "qwen2.5-3b-instruct-q4_k_m.gguf",
+    "cognition_system0_options": {"thinking": false},
+    "cognition_system1_model": "qwen2.5-7b-instruct-q4_k_m.gguf",
+    "cognition_system1_options": {"thinking": false},
+    "cognition_system2_model": "qwen2.5-7b-instruct-q4_k_m.gguf",
+    "cognition_system2_options": {"thinking": true},
+    "cognition_route_model": "qwen2.5-3b-instruct-q4_k_m.gguf",
+    "cognition_route_options": {"thinking": false},
+    "cognition_init_model": "qwen2.5-3b-instruct-q4_k_m.gguf",
+    "cognition_init_options": {"thinking": false},
+    "cognition_repair_model": "qwen2.5-7b-instruct-q4_k_m.gguf",
+    "cognition_repair_options": {"thinking": false},
+    "cognition_judge_model": "qwen2.5-7b-instruct-q4_k_m.gguf",
+    "cognition_judge_options": {"thinking": false},
+    "cognition_distill_enabled": false,
+    "cognition_system3_enabled": false,
+    "cognition_system0_max_steps": 1,
+    "cognition_system1_max_steps": 4,
+    "cognition_system2_max_steps": 3
+  },
+  "tool": {
+    "active_tool_limit": 100,
+    "planner_tool_profile": "initial",
+    "planner_dynamic_activation_enabled": true,
+    "planner_activation_ttl_s": 5.0,
+    "planner_hide_duplicate_ui_tools": true,
+    "planner_show_embodiment_fallback_tools": false,
+    "application_catalog_path": "./config/app_launchers.json"
+  },
+  "search": {
+    "provider": "searxng",
+    "searxng_url": "http://127.0.0.1:8081",
+    "timeout_s": 20
+  },
+  "telegram": {
+    "bot_token": "",
+    "allowed_chat_ids": [],
+    "response_mode": "text",
+    "send_typing_action": true,
+    "send_user_updates": true
+  },
+  "whatsapp": {
+    "auth_dir": "./data/whatsapp_auth",
+    "incoming_dir": "./data/whatsapp_inbox",
+    "session_name": "primary",
+    "self_chat_only": true,
+    "trigger_prefix": "/agi",
+    "response_mode": "same",
+    "qr_in_terminal": true
+  },
+  "voice": {
+    "sample_rate": 16000,
+    "vad_mode": 3,
+    "wake_required": true,
+    "wake_mode": "stt_prefix",
+    "wakeword_models": ["hey_mycroft"],
+    "stt_model": "small.en",
+    "stt_device": "auto",
+    "stt_compute_type": "int8",
+    "tts_enabled": true,
+    "tts_rate": 175,
+    "tts_volume": 1.0,
+    "suppress_mic_during_tts": true,
+    "conversation_timeout_s": 60,
+    "sleep_phrases": ["sleep"]
+  },
+  "vision": {
+    "camera_index": 0,
+    "model_path": "yolov8n.pt",
+    "capture_interval_ms": 200,
+    "conf_threshold": 0.35,
+    "track_enabled": true,
+    "preview_enabled": true,
+    "broker_enabled": true,
+    "broker_dir": "./data/vision_broker",
+    "object_memory_enabled": false
+  },
+  "video": {
+    "transcription_enabled": true,
+    "ffmpeg_binary": "ffmpeg"
+  },
+  "google": {},
+  "evolve": {},
+  "autonomy": {"enabled": false}
+}

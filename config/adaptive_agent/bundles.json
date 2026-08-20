@@ -1,0 +1,125 @@
+{
+  "bundles": [
+    {
+      "id": "core",
+      "description": "Small runtime core needed by every adaptive cell.",
+      "paths": [
+        "src/adaptive_agent/**",
+        "src/common/**",
+        "src/integrations/**",
+        "src/storage/**",
+        "src/voice_daemon/**",
+        "config/adaptive_agent/**",
+        "scripts/adaptive_agent_*.py",
+        "scripts/run_all.*",
+        "README.md",
+        "docs/adaptive_agent.md"
+      ]
+    },
+    {
+      "id": "tool_runtime_basic",
+      "description": "Existing tool runtime and safe local file/data/archive tools.",
+      "paths": [
+        "src/tool_runtime/**",
+        "config/tool_registry.json",
+        "tests/test_tool_runtime_redaction.py",
+        "tests/test_general_tools.py"
+      ]
+    },
+    {
+      "id": "coding_tools",
+      "description": "Repo search and git-oriented tools for coding agents.",
+      "paths": [
+        "src/tool_runtime/**",
+        "scripts/local_code_agent.py",
+        "tests/test_local_code_agent.py",
+        "tests/test_agi_code_wrapper.py"
+      ]
+    },
+    {
+      "id": "network_tools",
+      "description": "Network/search tools, only activated when network is allowed.",
+      "paths": [
+        "src/tool_runtime/**",
+        "tests/test_google_tools.py"
+      ]
+    },
+    {
+      "id": "phone_tools",
+      "description": "Android/phone embodiment bridge tools.",
+      "paths": [
+        "src/embodiment/**",
+        "tests/test_embodiment_*.py"
+      ]
+    },
+    {
+      "id": "vision_tools",
+      "description": "Image, video, and live vision tooling.",
+      "paths": [
+        "src/model_server/image_embed_model.py",
+        "src/model_server/vision_model.py",
+        "src/model_server/video_model.py",
+        "src/model_server/frame_sequence.py",
+        "src/common/vision_broker.py",
+        "src/voice_daemon/vision_*.py",
+        "yolov8n.pt",
+        "tests/test_vision_*.py",
+        "tests/test_video_model.py",
+        "tests/test_image_embed_model.py"
+      ]
+    },
+    {
+      "id": "cognition_basic",
+      "description": "Orchestrator cognition routing and mode configuration.",
+      "paths": [
+        "src/orchestrator/**",
+        "src/autonomy/cognition_client.py",
+        "src/common/types.py",
+        "tests/test_cognition_mode.py",
+        "tests/test_autonomy_cognition_client.py"
+      ]
+    },
+    {
+      "id": "model_runtime",
+      "description": "Local model server clients and llama.cpp launch support.",
+      "paths": [
+        "src/model_server/**",
+        "config/settings.json",
+        "tests/test_ollama_client.py"
+      ]
+    },
+    {
+      "id": "llama_swap",
+      "description": "llama-swap config and model entrypoint for multi-model machines.",
+      "paths": [
+        "config/config.yaml",
+        "scripts/adaptive_agent_start_model.py"
+      ]
+    },
+    {
+      "id": "autonomy",
+      "description": "Optional background autonomy loops for stronger machines.",
+      "paths": [
+        "src/autonomy/**",
+        "src/epistemic/**",
+        "src/power_process/**",
+        "src/runtime_core/**",
+        "docker-compose.neo4j.yml",
+        "scripts/run_autonomy_runtime.*",
+        "tests/test_autonomy_*.py",
+        "tests/test_evolve_*.py"
+      ]
+    },
+    {
+      "id": "prompts",
+      "description": "System identity, soul, personality, and prompt config.",
+      "paths": [
+        "config/system_entity.json",
+        "config/soul.json",
+        "config/personality.json",
+        "soul/**",
+        "reflection/**"
+      ]
+    }
+  ]
+}

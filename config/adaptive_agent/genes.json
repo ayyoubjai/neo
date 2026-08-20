@@ -1,0 +1,428 @@
+{
+  "genes": [
+    {
+      "id": "cognition.system0_only",
+      "type": "cognition",
+      "priority": 100,
+      "purposes": ["assistant", "phone_companion", "coding", "research", "automation"],
+      "requires": {
+        "device_classes": ["phone_tiny", "phone_small", "phone_strong", "pc_tiny"]
+      },
+      "payload": {
+        "mode": "system0",
+        "aliases": ["SYSTEM0"],
+        "bundles": ["cognition_basic"],
+        "description": "Fastest mode: one direct system0 pass, minimal tool loop.",
+        "requested_mode": "SYSTEM0",
+        "systems_enabled": ["SYSTEM0"],
+        "settings_patch": {
+          "orchestrator": {
+            "cognition_force_system": "system0",
+            "cognition_system0_max_steps": 1,
+            "cognition_system1_max_steps": 1,
+            "cognition_system2_max_steps": 1,
+            "cognition_system3_enabled": false,
+            "cognition_action_limit": 2,
+            "cognition_trivial_query_target": "system0",
+            "cognition_mode": "small"
+          },
+          "autonomy": {
+            "requested_mode": "SYSTEM0",
+            "enabled": false,
+            "start_with_run_all": false
+          }
+        }
+      }
+    },
+    {
+      "id": "cognition.system0_system1",
+      "type": "cognition",
+      "priority": 100,
+      "purposes": ["assistant", "coding", "research", "automation"],
+      "requires": {
+        "device_classes": ["pc_small"]
+      },
+      "payload": {
+        "mode": "system1",
+        "aliases": ["SYSTEM1", "system0_system1"],
+        "bundles": ["cognition_basic"],
+        "description": "Small-PC mode: system0 for trivial turns and system1 for simple planning.",
+        "requested_mode": "SYSTEM1",
+        "systems_enabled": ["SYSTEM0", "SYSTEM1"],
+        "settings_patch": {
+          "orchestrator": {
+            "cognition_force_system": "system1",
+            "cognition_system0_max_steps": 1,
+            "cognition_system1_max_steps": 3,
+            "cognition_system2_max_steps": 1,
+            "cognition_system3_enabled": false,
+            "cognition_action_limit": 4,
+            "cognition_trivial_query_target": "system0",
+            "cognition_mode": "small"
+          },
+          "autonomy": {
+            "requested_mode": "SYSTEM1",
+            "enabled": false,
+            "start_with_run_all": false
+          }
+        }
+      }
+    },
+    {
+      "id": "cognition.system0_system1_system2",
+      "type": "cognition",
+      "priority": 100,
+      "purposes": ["assistant", "coding", "research", "automation"],
+      "requires": {
+        "device_classes": ["pc_medium"]
+      },
+      "payload": {
+        "mode": "system2",
+        "aliases": ["SYSTEM2", "system0_system1_system2"],
+        "bundles": ["cognition_basic"],
+        "description": "Medium-PC mode: system0/system1 plus deeper system2 reasoning.",
+        "requested_mode": "COGNITION",
+        "systems_enabled": ["SYSTEM0", "SYSTEM1", "SYSTEM2"],
+        "settings_patch": {
+          "orchestrator": {
+            "cognition_force_system": "",
+            "cognition_system0_max_steps": 1,
+            "cognition_system1_max_steps": 4,
+            "cognition_system2_max_steps": 3,
+            "cognition_system3_enabled": false,
+            "cognition_action_limit": 6,
+            "cognition_trivial_query_target": "system1"
+          },
+          "autonomy": {
+            "requested_mode": "COGNITION",
+            "enabled": false,
+            "start_with_run_all": false
+          }
+        }
+      }
+    },
+    {
+      "id": "cognition.full_systems",
+      "type": "cognition",
+      "priority": 110,
+      "purposes": ["assistant", "coding", "research", "automation"],
+      "requires": {
+        "device_classes": ["pc_strong"],
+        "min_ram_mb": 24000
+      },
+      "payload": {
+        "mode": "full",
+        "aliases": ["SYSTEM3", "COGNITION", "all", "system0_system1_system2_system3"],
+        "bundles": ["cognition_basic", "autonomy"],
+        "description": "Strong-machine mode: system0, system1, system2, and system3 peer cognition.",
+        "requested_mode": "COGNITION",
+        "systems_enabled": ["SYSTEM0", "SYSTEM1", "SYSTEM2", "SYSTEM3"],
+        "settings_patch": {
+          "orchestrator": {
+            "cognition_force_system": "",
+            "cognition_system0_max_steps": 1,
+            "cognition_system1_max_steps": 6,
+            "cognition_system2_max_steps": 4,
+            "cognition_system3_enabled": true,
+            "cognition_system3_rounds": 1,
+            "cognition_system3_parallel": true,
+            "cognition_action_limit": 8,
+            "cognition_trivial_query_target": "system1"
+          },
+          "autonomy": {
+            "requested_mode": "COGNITION"
+          }
+        }
+      }
+    },
+    {
+      "id": "model.phone.tiny.gguf",
+      "type": "model",
+      "priority": 90,
+      "purposes": ["assistant", "phone_companion", "coding", "research"],
+      "requires": {
+        "device_classes": ["phone_tiny", "phone_small"],
+        "min_ram_mb": 1500,
+        "min_storage_free_mb": 900
+      },
+      "payload": {
+        "model_path": "models/Qwen3.5-0.8B-Q4_K_M.gguf",
+        "server_binary": "llama-server",
+        "bundles": ["model_runtime"],
+        "options": {
+          "ctx_size": 2048,
+          "threads": 4,
+          "port": 8080
+        }
+      }
+    },
+    {
+      "id": "model.phone.strong.gguf",
+      "type": "model",
+      "priority": 100,
+      "purposes": ["assistant", "phone_companion", "coding", "research"],
+      "requires": {
+        "device_classes": ["phone_strong"],
+        "min_ram_mb": 6000,
+        "min_storage_free_mb": 2500
+      },
+      "payload": {
+        "model_path": "models/Qwen3.5-4B-Q4_K_M.gguf",
+        "server_binary": "llama-server",
+        "bundles": ["model_runtime"],
+        "options": {
+          "ctx_size": 4096,
+          "threads": 6,
+          "port": 8080
+        }
+      }
+    },
+    {
+      "id": "model.pc.small.gguf",
+      "type": "model",
+      "priority": 80,
+      "purposes": ["assistant", "coding", "research", "automation"],
+      "requires": {
+        "device_classes": ["pc_tiny", "pc_small"],
+        "min_ram_mb": 3500,
+        "min_storage_free_mb": 2500
+      },
+      "payload": {
+        "model_path": "models/Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+        "server_binary": "llama-server",
+        "bundles": ["model_runtime"],
+        "options": {
+          "ctx_size": 4096,
+          "threads": 4,
+          "port": 8080
+        }
+      }
+    },
+    {
+      "id": "model.pc.medium.gguf",
+      "type": "model",
+      "priority": 100,
+      "purposes": ["assistant", "coding", "research", "automation"],
+      "requires": {
+        "device_classes": ["pc_medium", "pc_strong"],
+        "min_ram_mb": 10000,
+        "min_storage_free_mb": 6000
+      },
+      "payload": {
+        "model_path": "models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        "server_binary": "llama-server",
+        "bundles": ["model_runtime", "llama_swap"],
+        "options": {
+          "ctx_size": 8192,
+          "threads": 8,
+          "port": 8080
+        }
+      }
+    },
+    {
+      "id": "tool.notes.local",
+      "type": "tool",
+      "priority": 80,
+      "purposes": ["assistant", "phone_companion", "research", "coding"],
+      "requires": {
+        "device_classes": ["*"],
+        "min_storage_free_mb": 20
+      },
+      "payload": {
+        "description": "Read and write local notes inside the workspace.",
+        "bundles": ["tool_runtime_basic"],
+        "tool_ids": ["fs.read_file", "fs.write_file", "fs.list_dir", "fs.stat"]
+      }
+    },
+    {
+      "id": "tool.shell.execution",
+      "type": "tool",
+      "priority": 60,
+      "purposes": ["coding", "automation", "research"],
+      "requires": {
+        "device_classes": ["phone_small", "phone_strong", "pc_small", "pc_medium", "pc_strong"],
+        "min_ram_mb": 3000
+      },
+      "payload": {
+        "description": "Run bounded local process commands through the existing tier-2 executor.",
+        "bundles": ["tool_runtime_basic"],
+        "tool_ids": ["proc.exec"]
+      }
+    },
+    {
+      "id": "tool.repo.index",
+      "type": "tool",
+      "priority": 75,
+      "purposes": ["coding", "research"],
+      "requires": {
+        "device_classes": ["pc_small", "pc_medium", "pc_strong"],
+        "min_ram_mb": 6000,
+        "min_storage_free_mb": 500
+      },
+      "payload": {
+        "description": "Index and search source repositories.",
+        "bundles": ["coding_tools"],
+        "tool_ids": ["fs.find", "fs.search_text", "git.status", "git.diff", "git.log"]
+      }
+    },
+    {
+      "id": "tool.archive.dna",
+      "type": "tool",
+      "priority": 65,
+      "purposes": ["coding", "automation", "research"],
+      "requires": {
+        "device_classes": ["*"],
+        "min_storage_free_mb": 100
+      },
+      "payload": {
+        "description": "Create and extract compressed workspace archives.",
+        "bundles": ["tool_runtime_basic"],
+        "tool_ids": ["archive.zip_create", "archive.zip_extract"]
+      }
+    },
+    {
+      "id": "tool.network.research",
+      "type": "tool",
+      "priority": 55,
+      "purposes": ["research", "assistant", "coding"],
+      "requires": {
+        "device_classes": ["pc_small", "pc_medium", "pc_strong", "phone_strong"],
+        "network": true
+      },
+      "payload": {
+        "description": "Use web/search tools when the purpose profile allows network access.",
+        "bundles": ["network_tools"],
+        "tool_ids": ["net.search", "http.request"]
+      }
+    },
+    {
+      "id": "tool.phone.senses",
+      "type": "tool",
+      "priority": 70,
+      "purposes": ["phone_companion", "assistant"],
+      "requires": {
+        "device_classes": ["phone_small", "phone_strong"],
+        "android": true
+      },
+      "payload": {
+        "description": "Phone or Android-adjacent actions using existing embodiment phone tools.",
+        "bundles": ["phone_tools"],
+        "tool_ids": [
+          "embodiment.phone_screen_capture",
+          "embodiment.phone_tap",
+          "embodiment.phone_swipe",
+          "embodiment.phone_type",
+          "embodiment.phone_launch_app"
+        ]
+      }
+    },
+    {
+      "id": "tool.vision.local",
+      "type": "tool",
+      "priority": 50,
+      "purposes": ["assistant", "research", "automation"],
+      "requires": {
+        "device_classes": ["pc_medium", "pc_strong"],
+        "min_ram_mb": 10000
+      },
+      "payload": {
+        "description": "Use existing image/video/live-vision analysis tools.",
+        "bundles": ["vision_tools"],
+        "tool_ids": ["image.analyse", "video.analyse", "vision.observe"]
+      }
+    },
+    {
+      "id": "service.model.llama_cpp",
+      "type": "service",
+      "priority": 95,
+      "purposes": ["assistant", "phone_companion", "coding", "research", "automation"],
+      "requires": {
+        "device_classes": ["phone_tiny", "phone_small", "phone_strong", "pc_tiny", "pc_small"]
+      },
+      "payload": {
+        "server_kind": "llama_cpp",
+        "description": "Start one llama.cpp server directly for weak or simple local cells.",
+        "bundles": ["model_runtime"],
+        "termux_setup": [
+          "pkg update",
+          "pkg install -y git cmake clang",
+          "git clone https://github.com/ggml-org/llama.cpp",
+          "cmake -S llama.cpp -B llama.cpp/build -DLLAMA_CURL=OFF",
+          "cmake --build llama.cpp/build --config Release -j"
+        ]
+      }
+    },
+    {
+      "id": "service.model.llama_swap",
+      "type": "service",
+      "priority": 110,
+      "purposes": ["assistant", "coding", "research", "automation"],
+      "requires": {
+        "device_classes": ["pc_medium", "pc_strong"],
+        "min_ram_mb": 10000
+      },
+      "payload": {
+        "server_kind": "llama_swap",
+        "description": "Start llama-swap so strong machines can route across several GGUF models.",
+        "bundles": ["llama_swap"],
+        "binary": "llama-swap",
+        "config_path": "config/config.yaml",
+        "listen": "localhost:8080"
+      }
+    },
+    {
+      "id": "service.autonomy.light",
+      "type": "service",
+      "priority": 50,
+      "purposes": ["automation", "research"],
+      "requires": {
+        "device_classes": ["pc_medium", "pc_strong"],
+        "min_ram_mb": 12000,
+        "background": true
+      },
+      "payload": {
+        "description": "Light background planning loop.",
+        "bundles": ["autonomy"]
+      }
+    },
+    {
+      "id": "prompt.local_first",
+      "type": "prompt",
+      "priority": 100,
+      "purposes": ["*"],
+      "requires": {
+        "device_classes": ["*"]
+      },
+      "payload": {
+        "bundles": ["prompts"],
+        "system_fragment": "Prefer local, low-cost actions. Explain when a requested capability is not active on this device."
+      }
+    },
+    {
+      "id": "prompt.coding",
+      "type": "prompt",
+      "priority": 90,
+      "purposes": ["coding"],
+      "requires": {
+        "device_classes": ["*"]
+      },
+      "payload": {
+        "bundles": ["prompts"],
+        "system_fragment": "Act as a careful local coding agent. Inspect before editing and keep changes scoped."
+      }
+    },
+    {
+      "id": "prompt.phone_companion",
+      "type": "prompt",
+      "priority": 90,
+      "purposes": ["phone_companion"],
+      "requires": {
+        "device_classes": ["phone_tiny", "phone_small", "phone_strong"]
+      },
+      "payload": {
+        "bundles": ["prompts"],
+        "system_fragment": "Act as a compact phone companion. Keep responses short and avoid heavy background work."
+      }
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "applications": [
+    {
+      "app_id": "notepad",
+      "name": "Notepad",
+      "description": "Windows text editor.",
+      "aliases": ["text_editor"],
+      "commands": {
+        "windows": ["C:\\Windows\\System32\\notepad.exe"],
+        "wsl": ["C:\\Windows\\System32\\notepad.exe"]
+      }
+    },
+    {
+      "app_id": "calculator",
+      "name": "Calculator",
+      "description": "Windows Calculator.",
+      "aliases": ["calc"],
+      "commands": {
+        "windows": ["C:\\Windows\\System32\\calc.exe"],
+        "wsl": ["C:\\Windows\\System32\\calc.exe"]
+      }
+    }
+  ]
+}

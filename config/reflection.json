@@ -1,0 +1,16 @@
+{
+  "output_dir": "reflection/runs",
+  "max_record_events": 5000,
+  "max_complex_events": 5000,
+  "max_error_events": 1000,
+  "max_audit_events": 1000,
+  "max_dossiers": 8,
+  "max_trace_failures": 4,
+  "max_generated_capabilities": 3,
+  "max_structural_hotspots": 3,
+  "hotspot_score_threshold": 0.6,
+  "hotspot_size_bytes_high": 180000,
+  "hotspot_symbol_count_high": 80,
+  "hotspot_dependency_count_high": 10,
+  "hotspot_inbound_count_high": 10
+}

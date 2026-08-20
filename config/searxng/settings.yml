@@ -1,0 +1,17 @@
+use_default_settings: true
+
+general:
+  instance_name: "AGI Local Search"
+
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json
+
+server:
+  # The container is published only to 127.0.0.1 by docker-compose.searxng.yml.
+  # Do not expose it publicly without a reverse proxy, authentication, and rate limits.
+  limiter: false
+  public_instance: false
+  image_proxy: false

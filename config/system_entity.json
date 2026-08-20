@@ -1,0 +1,15 @@
+{
+  "mem_id": "system.object",
+  "name": "system",
+  "aliases": [
+    "neo",
+    "laptop",
+    "assistant",
+    "system"
+  ],
+  "properties": {
+    "description": "Hybrid voice-first assistant MVP",
+    "version": "0.1.0"
+  },
+  "pins": ["IMMUTABLE_CORE_REFERENCE"]
+}

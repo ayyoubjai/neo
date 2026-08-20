@@ -1,0 +1,128 @@
+{
+  "targets": [],
+  "autonomous": {
+    "enabled": true,
+    "fallback_to_config_targets": true,
+    "reflection_config": "config/reflection.json",
+    "soul_config": "config/soul.json",
+    "refresh_soul": true,
+    "max_dossiers": 3,
+    "max_targets_per_dossier": 1,
+    "target_kinds": ["trace_failure", "generated_capability_review", "structural_hotspot"],
+    "prefer_symbols": true
+  },
+  "generator": {
+    "command": "python scripts/evolve_generate_llm.py --enable-thinking",
+    "timeout_s": 180,
+    "max_candidates": 4,
+    "runs": 4,
+    "candidates_per_run": 1,
+    "fallback": {
+      "local_heuristic": true,
+      "fallback_to_inbox_on_error": true,
+      "fallback_to_inbox_on_empty": true
+    }
+  },
+  "candidate_source": {
+    "inbox_dir": "evolve/candidates/inbox"
+  },
+  "project_profile": {
+    "enabled": true,
+    "file": "evolve/project_profile.json",
+    "mode": "replace",
+    "baseline_preflight": true
+  },
+  "metrics": [
+    {
+      "name": "performance",
+      "type": "command",
+      "command": "python scripts/evolve_metric_runner.py --metric minimal_diff --target {target_path} --repo-root {run_dir} --baseline-root {repo_root}",
+      "weight": 0.2,
+      "required": false,
+      "parse_json": true
+    },
+    {
+      "name": "correctness",
+      "type": "command",
+      "command": "python scripts/evolve_metric_runner.py --metric syntax --target {target_path} --repo-root {run_dir}",
+      "weight": 0.3,
+      "required": true,
+      "parse_json": true
+    },
+    {
+      "name": "safety",
+      "type": "command",
+      "command": "python scripts/evolve_metric_runner.py --metric safety --target {target_path} --repo-root {run_dir} --baseline-root {repo_root}",
+      "weight": 0.2,
+      "required": false,
+      "parse_json": true
+    },
+    {
+      "name": "tests",
+      "type": "command",
+      "command": "python scripts/evolve_metric_runner.py --metric import --target {target_path} --repo-root {run_dir}",
+      "weight": 0.2,
+      "required": true,
+      "parse_json": true
+    },
+    {
+      "name": "readability",
+      "type": "command",
+      "command": "python scripts/evolve_metric_runner.py --metric readability --target {target_path} --repo-root {run_dir}",
+      "weight": 0.1,
+      "required": false,
+      "parse_json": true
+    }
+  ],
+  "selection": {
+    "min_score": 0.7,
+    "top_k": 1
+  },
+  "evolution": {
+    "generations": 4,
+    "parent_pool_size": 2,
+    "seed_from": "promoted",
+    "seed_max_chars": 12000
+  },
+  "context": {
+    "enabled": false,
+    "probe_command": "python scripts/evolve_probe_llm.py --enable-thinking",
+    "providers": ["rg_symbols", "explicit_files", "adjacent_files"],
+    "max_symbols": 12,
+    "max_files": 6,
+    "max_snippets": 20,
+    "snippet_radius": 6,
+    "max_chars": 12000,
+    "max_file_chars": 2000,
+    "adjacent_max_files": 3
+  },
+  "execution": {
+    "backend": "git_worktree",
+    "evolution_repo_dir": "evolve/workspace/repo",
+    "copy_mode": "copy"
+  },
+  "reporting": {
+    "dashboard": true,
+    "dashboard_file": "report.html",
+    "log_file": "evolution.log",
+    "dashboard_command": "python scripts/evolve_report.py --report {report_path} --output {output_path}"
+  },
+  "copy_ignore": [
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    "*.pyc",
+    "data",
+    "models",
+    "screenshots",
+    "reflection",
+    "soul",
+    "workspace",
+    "evolve/base_models",
+    "evolve/output",
+    "evolve/runs",
+    "evolve/candidates"
+  ]
+}

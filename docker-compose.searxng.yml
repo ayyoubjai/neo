@@ -1,0 +1,14 @@
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: agi-searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8081:8080"
+    environment:
+      SEARXNG_BIND_ADDRESS: "0.0.0.0"
+      SEARXNG_PORT: "8080"
+      SEARXNG_SECRET: "${SEARXNG_SECRET:?Run scripts/setup_release.py first, or set SEARXNG_SECRET in .env}"
+    volumes:
+      - ./config/searxng:/etc/searxng:ro
+      - ./data/searxng:/var/cache/searxng

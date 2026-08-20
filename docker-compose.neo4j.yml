@@ -1,0 +1,11 @@
+version: "3"
+services:
+  neo4j:
+    image: neo4j:latest
+    ports:
+      - "7474:7474" # HTTP Web Interface
+      - "7687:7687" # Bolt Protocol (for Python driver)
+    environment:
+      - NEO4J_AUTH=neo4j/epistemic123
+    volumes:
+      - ./data/neo4j:/data

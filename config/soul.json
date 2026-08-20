@@ -1,0 +1,23 @@
+{
+  "output_dir": "soul",
+  "max_file_bytes": 524288,
+  "include": [
+    "README.md",
+    "requirements.txt",
+    "config",
+    "docs",
+    "scripts",
+    "src"
+  ],
+  "exclude": [
+    "soul/**",
+    ".git/**",
+    ".venv/**",
+    "venv/**",
+    "data/**",
+    "workspace/**",
+    "evolve/**",
+    "**/__pycache__/**",
+    "**/*.pyc"
+  ]
+}
