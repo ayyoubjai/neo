@@ -42,35 +42,6 @@ def _format_memory(memory: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _format_embodiment(embodiment: Any) -> str:
-    if not isinstance(embodiment, dict) or not embodiment:
-        return "None"
-    summary = str(embodiment.get("summary") or "").strip()
-    if summary:
-        return summary
-    host = embodiment.get("host", {})
-    if isinstance(host, dict):
-        host_name = str(host.get("name") or host.get("host_id") or "").strip()
-    else:
-        host_name = ""
-    available = embodiment.get("available_capabilities", [])
-    if isinstance(available, list):
-        available_text = ", ".join(str(item) for item in available[:8] if str(item).strip())
-    else:
-        available_text = ""
-    parts = []
-    if host_name:
-        parts.append(f"host={host_name}")
-    if available_text:
-        parts.append(f"available_capabilities={available_text}")
-    if not parts:
-        try:
-            return json.dumps(embodiment, ensure_ascii=False)
-        except TypeError:
-            return str(embodiment)
-    return "; ".join(parts)
-
-
 _SYSTEM_PROMPT_CACHE: Dict[str, Optional[object]] = {
     "entity_mtime": None, 
     "personality_mtime": None,
@@ -156,10 +127,6 @@ def _should_request_json_response(mode: str, text: str, enforce_json: bool) -> b
     return bool(enforce_json) or _requires_structured_json(text)
 
 
-def _mode_allows_embodiment(mode: Any) -> bool:
-    return False
-
-
 def _format_prompt_user_turn(mode: Any, text: str) -> str:
     return text
 
@@ -212,9 +179,9 @@ def generate(
     mode = "COGNITION"
     summary = context.get("summary", "")
     memory = context.get("memory", [])
-    embodiment = {}
     trace_id = context.get("trace_id")
     turn_id = context.get("turn_id")
+    current_time = str(context.get("current_time") or "").strip()
     suppress_summary_memory = bool(context.get("suppress_summary_memory", False))
     settings = load_settings()
     override_model = str(model_override or "").strip()
@@ -233,13 +200,20 @@ def generate(
     structured_json_required = _should_request_json_response(mode, text, enforce_json)
     system = _build_system_prompt()
     memory_block = _format_memory(memory) if memory else "None"
-    embodiment_block = _format_embodiment(embodiment) if _mode_allows_embodiment(mode) else ""
     if _mode_uses_raw_prompt(mode):
-        prompt = text
+        semantic_summary = str(context.get("semantic_summary") or "").strip()
+        conversation_context = semantic_summary or str(summary or "").strip()
+        prompt_parts = []
+        if current_time:
+            prompt_parts.extend([f"Current UTC time: {current_time}", ""])
+        if not suppress_summary_memory and conversation_context:
+            prompt_parts.extend(["Conversation context:", conversation_context, ""])
+        if not suppress_summary_memory and memory:
+            prompt_parts.extend(["Relevant memory:", memory_block, ""])
+        prompt_parts.append(text)
+        prompt = "\n".join(prompt_parts)
     elif suppress_summary_memory:
         prompt_parts = [f"Mode: {mode}", ""]
-        if _mode_allows_embodiment(mode):
-            prompt_parts.extend([f"Embodiment:\n{embodiment_block}", ""])
         prompt_parts.extend([_format_prompt_user_turn(mode, text), "Assistant:"])
         prompt = "\n".join(prompt_parts)
     else:
@@ -249,8 +223,6 @@ def generate(
             f"Memory:\n{memory_block}",
             "",
         ]
-        if _mode_allows_embodiment(mode):
-            prompt_parts.extend([f"Embodiment:\n{embodiment_block}", ""])
         prompt_parts.extend([_format_prompt_user_turn(mode, text), "Assistant:"])
         prompt = "\n".join(prompt_parts)
     current_provider = provider()
@@ -267,7 +239,6 @@ def generate(
                     "system": system,
                     "prompt": prompt,
                     "memory_count": len(memory),
-                    "embodiment_present": bool(embodiment),
                     "model": model,
                 },
             )
@@ -323,7 +294,6 @@ def generate(
                     "system": system,
                     "prompt": prompt,
                     "memory_count": len(memory),
-                    "embodiment_present": bool(embodiment),
                     "model": model,
                 },
             )
@@ -387,7 +357,6 @@ def generate(
                     "system": system,
                     "prompt": prompt,
                     "memory_count": len(memory),
-                    "embodiment_present": bool(embodiment),
                     "model": model,
                 },
             )
@@ -459,6 +428,9 @@ def generate(
             },
         )
         return ""
+
+    if context.get("require_model_output"):
+        raise RuntimeError(f"Model generation failed ({model}): {fallback_error or 'no output'}")
 
     fallback = (
         "I hit a model/runtime issue while processing your request, so I cannot give a reliable answer right now. "

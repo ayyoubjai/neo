@@ -1,6 +1,7 @@
 import asyncio
 import difflib
 import hashlib
+import inspect
 import os
 import re
 from urllib.parse import unquote, urlparse
@@ -12,6 +13,7 @@ from common.jsonlog import append_jsonl
 from common.jsonl_rpc import send_request, start_server
 from common.record_log import record_event
 from common.tool_metadata import redact_tool_payload
+from common.tool_recovery import failure_details
 from common.time_utils import utc_now_iso
 from integrations.google_workspace import GoogleAuthError, GoogleWorkspaceManager
 from tool_runtime.sandbox import SandboxViolation, resolve_workspace_path
@@ -78,6 +80,8 @@ def _google_bundle_list(raw_value: Any) -> List[str]:
 def _auto_google_authorize(settings: Optional[Any] = None) -> None:
     resolved_settings = settings or load_settings()
     google_cfg = getattr(resolved_settings, "google", {}) or {}
+    if not _bool_setting(google_cfg.get("enabled", True)):
+        return
     if not _bool_setting(google_cfg.get("auto_google_authorize", False)):
         return
 
@@ -222,6 +226,59 @@ class ToolRuntime:
                 raise
         return normalized
 
+    def _make_nested_tool_caller(
+        self,
+        approval_token: Any,
+        trace_id: Any,
+        parent_tier: int,
+        stack: tuple[str, ...],
+    ):
+        """Build the synchronous composition API exposed to generated tools."""
+        def call_tool(nested_tool_id: Any, nested_args: Any):
+            if not isinstance(nested_tool_id, str) or not nested_tool_id.strip():
+                return {"status": "ERROR", "error": "Nested tool_id must be a string"}, {}
+            if not isinstance(nested_args, dict):
+                return {"status": "ERROR", "error": "Nested tool args must be an object"}, {}
+            nested_tool_id = nested_tool_id.strip()
+            if nested_tool_id in stack:
+                return {"status": "ERROR", "error": "Nested tool cycle detected"}, {}
+            nested_tool = self._tools.get(nested_tool_id)
+            if not isinstance(nested_tool, dict):
+                return {"status": "ERROR", "error": f"Unknown nested tool: {nested_tool_id}"}, {}
+            try:
+                nested_tier = int(nested_tool.get("tier", 0))
+            except (TypeError, ValueError):
+                nested_tier = 0
+            if nested_tier > parent_tier:
+                return {
+                    "status": "ERROR",
+                    "error": f"Nested tool '{nested_tool_id}' requires a higher permission tier",
+                }, {}
+            try:
+                run_args = nested_args
+                if bool(nested_tool.get("generated")):
+                    run_args = self._normalize_generated_args(nested_args)
+                nested_caller = self._make_nested_tool_caller(
+                    approval_token,
+                    trace_id,
+                    nested_tier,
+                    stack + (nested_tool_id,),
+                )
+                if bool(nested_tool.get("generated")):
+                    parameters = inspect.signature(nested_tool["fn"]).parameters
+                    if len(parameters) >= 3:
+                        return nested_tool["fn"](run_args, self._workspace_root, nested_caller)
+                    # Support generated modules produced before the optional
+                    # composition argument was introduced.
+                    return nested_tool["fn"](run_args, self._workspace_root)
+                return nested_tool["fn"](run_args, self._workspace_root)
+            except ToolError as exc:
+                return {"status": "ERROR", "error": str(exc), "error_details": exc.details}, getattr(exc, "io", {})
+            except Exception as exc:
+                return {"status": "ERROR", "error": f"Nested tool exception: {exc}"}, {}
+
+        return call_tool
+
     async def Execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
         self._refresh_generated_tools()
         tool_id = params.get("tool_id", "")
@@ -264,7 +321,8 @@ class ToolRuntime:
                     "error": "Unknown tool",
                 },
             )
-            return {"request_id": request_id, "status": "DENIED", "error": "Unknown tool"}
+            return {"request_id": request_id, "status": "DENIED", "error": "Unknown tool",
+                    "error_details": failure_details('MISSING_CAPABILITY')}
 
         tool = self._tools[tool_id]
         tier = tool.get("tier", 0)
@@ -287,7 +345,8 @@ class ToolRuntime:
                     "status": "NEEDS_CONFIRMATION",
                 },
             )
-            return {"request_id": request_id, "status": "NEEDS_CONFIRMATION"}
+            return {"request_id": request_id, "status": "NEEDS_CONFIRMATION",
+                    "error_details": failure_details('PERMISSION_DENIED')}
 
         artifacts: List[Dict[str, Any]] = []
         logs_ref = None
@@ -309,7 +368,22 @@ class ToolRuntime:
                 "tool_execute_start",
                 start_payload,
             )
-            result, io = tool["fn"](run_args, self._workspace_root)
+            if bool(tool.get("generated")):
+                nested_caller = self._make_nested_tool_caller(
+                    approval_token,
+                    trace_id,
+                    int(tier),
+                    (str(tool_id),),
+                )
+                parameters = inspect.signature(tool["fn"]).parameters
+                if len(parameters) >= 3:
+                    result, io = tool["fn"](run_args, self._workspace_root, nested_caller)
+                else:
+                    # Support generated modules produced before the optional
+                    # composition argument was introduced.
+                    result, io = tool["fn"](run_args, self._workspace_root)
+            else:
+                result, io = tool["fn"](run_args, self._workspace_root)
             if "diff" in required_artifacts and "before" in io and "after" in io:
                 path_for_diff = run_args.get("path", "") if isinstance(run_args, dict) else ""
                 diff_text = _unified_diff(io["before"], io["after"], path_for_diff)
@@ -373,6 +447,7 @@ class ToolRuntime:
                 "tool_id": tool_id,
                 "status": "ERROR",
                 "error": str(e),
+                "error_details": e.details,
             }
             err_io = getattr(e, "io", None)
             if isinstance(err_io, dict) and err_io:
@@ -386,9 +461,10 @@ class ToolRuntime:
                     "tool_id": tool_id,
                     "status": "ERROR",
                     "error": str(e),
+                    "error_details": e.details,
                 },
             )
-            return {"request_id": request_id, "status": "ERROR", "error": str(e)}
+            return {"request_id": request_id, "status": "ERROR", "error": str(e), "error_details": e.details}
         except Exception:
             self._append_tool_io(
                 {

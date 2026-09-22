@@ -39,7 +39,7 @@ fi
 
 SETTINGS_INTERFACE_MODES="$("${PYTHON_EXE}" -c "from common.config import load_settings; i=load_settings().interface; raw=i.get('mode', '') if isinstance(i, dict) else ''; values=raw if isinstance(raw, list) else [raw]; print(','.join(str(x).strip() for x in values if str(x).strip()))")"
 SETTINGS_INTERFACE_SENSES="$("${PYTHON_EXE}" -c "from common.config import load_settings; i=load_settings().interface; s=i.get('senses', []) if isinstance(i, dict) else []; print(','.join(str(x) for x in s if str(x).strip()))")"
-SETTINGS_AUTONOMY_RUN_ALL="$("${PYTHON_EXE}" -c "from common.config import load_settings; a=load_settings().autonomy; a=a if isinstance(a, dict) else {}; b=lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ('1','true','yes','on'); ep=b(a.get('epistemic_enabled', False)); pp=b(a.get('power_process_enabled', False)); enabled=a.get('enabled', None); enabled=(ep or pp) if enabled is None else b(enabled); start=b(a.get('start_with_run_all', False)); print('1' if start and enabled and (ep or pp) else '')")"
+SETTINGS_AUTONOMY_RUN_ALL="$("${PYTHON_EXE}" -c "from common.config import load_settings; a=load_settings().autonomy; a=a if isinstance(a, dict) else {}; b=lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ('1','true','yes','on'); ep=b(a.get('epistemic_enabled', False)); pp=b(a.get('power_process_enabled', False)); kg=b(a.get('knowledge_enabled', False)); enabled=a.get('enabled', None); enabled=(ep or pp or kg) if enabled is None else b(enabled); start=b(a.get('start_with_run_all', False)); print('1' if start and enabled and (ep or pp or kg) else '')")"
 RAW_INTERFACE_MODES="${SETTINGS_INTERFACE_MODES}"
 if [[ -z "${RAW_INTERFACE_MODES}" ]]; then
   RAW_INTERFACE_MODES="text"

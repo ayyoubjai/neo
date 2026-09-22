@@ -80,28 +80,52 @@ class CognitionClient:
         text, _ = await self._run_turn_with_trace(prompt, timeout=timeout or self.default_timeout_s)
         return text
 
-    async def generate_json(self, prompt: str, *, extraction_schema: str = "", timeout: Optional[int] = None) -> Dict[str, Any]:
+    async def generate_json(self, prompt: str, *, extraction_schema: str = "", timeout: Optional[int] = None, max_actions: Optional[int] = None, require_evidence: bool = False) -> Dict[str, Any]:
         effective_timeout = timeout or self.default_timeout_s
+        evidence = []
         if self.requested_mode and extraction_schema:
-            text, trace = await self._run_turn_with_trace(prompt, timeout=effective_timeout)
+            text, trace = await self._run_turn_with_trace(prompt, timeout=effective_timeout, max_actions=max_actions)
+            evidence = next((item["tool_evidence"] for item in reversed(trace) if isinstance(item, dict) and "tool_evidence" in item), [])
+            # Preserve an already structured result instead of asking another model turn
+            # to rewrite its quotations and qualifiers. generate_model still validates it.
+            import json
+            structured = parse_json_object(text)
+            try:
+                required = set(json.loads(extraction_schema))
+            except (ValueError, TypeError):
+                required = set()
+            if structured and required and required.issubset(structured):
+                return self._attach_evidence(structured, evidence) if require_evidence else structured
             extraction_prompt = self._build_extraction_prompt(text, trace, extraction_schema)
-            raw_output, _ = await self._run_turn_with_trace(extraction_prompt, timeout=effective_timeout, requested_mode="SYSTEM0")
+            raw_output, _ = await self._run_turn_with_trace(extraction_prompt, timeout=effective_timeout, requested_mode="SYSTEM0", max_actions=0)
         else:
-            raw_output, _ = await self._run_turn_with_trace(self._wrap_json_prompt(prompt), timeout=effective_timeout)
+            raw_output, trace = await self._run_turn_with_trace(self._wrap_json_prompt(prompt), timeout=effective_timeout, max_actions=max_actions)
+            evidence = next((item["tool_evidence"] for item in reversed(trace) if isinstance(item, dict) and "tool_evidence" in item), [])
             
         payload = parse_json_object(raw_output)
         if payload:
-            return payload
+            return self._attach_evidence(payload, evidence) if require_evidence else payload
         repaired_output, _ = await self._run_turn_with_trace(
             self._wrap_json_repair_prompt(raw_output),
             timeout=effective_timeout,
-            requested_mode="SYSTEM0" if self.requested_mode else None
+            requested_mode="SYSTEM0" if self.requested_mode else None,
+            max_actions=0,
         )
         repaired_payload = parse_json_object(repaired_output)
         if repaired_payload:
-            return repaired_payload
+            return self._attach_evidence(repaired_payload, evidence) if require_evidence else repaired_payload
         preview = repaired_output.strip().replace("\n", " ")[:300]
         raise CognitionJsonError(f"COGNITION returned non-JSON output: {preview}")
+
+    @staticmethod
+    def _attach_evidence(payload, evidence):
+        # This list comes from the orchestrator transport, never the model's JSON.
+        payload["evidence"] = evidence
+        usable = [entry for entry in evidence if isinstance(entry, dict) and entry.get("status") == "APPROVED" and entry.get("request_id")]
+        payload["ok"] = payload.get("ok") is True and bool(usable)
+        if not usable:
+            payload["sensor_data"] = "No successful tool execution was recorded. " + str(payload.get("sensor_data", ""))
+        return payload
 
     async def generate_model(
         self,
@@ -109,9 +133,11 @@ class CognitionClient:
         model_cls: Type[T],
         *,
         timeout: Optional[int] = None,
+        max_actions: int = 0,
+        require_evidence: bool = False,
     ) -> T:
         schema = self._build_schema_hint(model_cls)
-        payload = await self.generate_json(prompt, extraction_schema=schema, timeout=timeout)
+        payload = await self.generate_json(prompt, extraction_schema=schema, timeout=timeout, max_actions=max_actions, require_evidence=require_evidence)
         try:
             return _validate_model(model_cls, payload)
         except Exception as exc:
@@ -169,9 +195,10 @@ class CognitionClient:
             f"THINKING TRACE:\n{json.dumps(thinking_trace, indent=2)}\n"
         )
 
-    async def _run_turn_with_trace(self, prompt: str, *, timeout: int, requested_mode: Optional[str] = None) -> tuple[str, list]:
+    async def _run_turn_with_trace(self, prompt: str, *, timeout: int, requested_mode: Optional[str] = None, max_actions: Optional[int] = None) -> tuple[str, list]:
         session: Optional[OrchestratorSession] = None
         read_task: Optional[asyncio.Task] = None
+        wait_task: Optional[asyncio.Task] = None
         final_future: asyncio.Future[Dict[str, Any]] = asyncio.get_running_loop().create_future()
         turn_id_box: Dict[str, Optional[str]] = {"value": None}
 
@@ -203,7 +230,11 @@ class CognitionClient:
             await session.connect()
             read_task = asyncio.create_task(session.read_events(), name="autonomy-cognition-read-events")
             mode = requested_mode or self.requested_mode
-            turn_id = await session.submit_turn(prompt, requested_mode=mode)
+            constraints = {}
+            if max_actions is not None:
+                constraints = {"skip_distillation": True, "autonomy_constraints": {
+                    "max_actions": max_actions, "permission_policy": self.permission_policy}}
+            turn_id = await session.submit_turn(prompt, requested_mode=mode, **constraints)
             turn_id_box["value"] = turn_id
             wait_task = asyncio.create_task(
                 asyncio.wait_for(final_future, timeout=timeout),
@@ -226,10 +257,15 @@ class CognitionClient:
             trace = payload.get("thinking_trace", [])
             if not isinstance(trace, list):
                 trace = []
+            evidence = payload.get("tool_evidence", [])
+            trace = list(trace) + [{"tool_evidence": evidence if isinstance(evidence, list) else []}]
             return text, trace
         except asyncio.TimeoutError as exc:
             raise CognitionClientError(f"COGNITION request timed out after {timeout} seconds.") from exc
         finally:
+            if wait_task is not None:
+                wait_task.cancel()
+                await asyncio.gather(wait_task, return_exceptions=True)
             if read_task is not None:
                 read_task.cancel()
                 await asyncio.gather(read_task, return_exceptions=True)

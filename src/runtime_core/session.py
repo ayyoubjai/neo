@@ -143,6 +143,9 @@ class OrchestratorSession:
         *,
         requested_mode: Optional[str] = None,
         skip_distillation: bool = False,
+        autonomy_constraints: Optional[Dict[str, Any]] = None,
+        acceptance_checks: Optional[list[Dict[str, Any]]] = None,
+        resume_checkpoint: Optional[str] = None,
         turn_id: Optional[str] = None,
     ) -> str:
         resolved_turn_id = str(turn_id or new_id())
@@ -159,6 +162,12 @@ class OrchestratorSession:
             payload["requested_mode"] = normalized_mode
         if skip_distillation:
             payload["skip_distillation"] = True
+        if autonomy_constraints is not None:
+            payload["autonomy_constraints"] = dict(autonomy_constraints)
+        if acceptance_checks is not None:
+            payload["acceptance_checks"] = acceptance_checks
+        if resume_checkpoint is not None:
+            payload["resume_checkpoint"] = resume_checkpoint
         self._last_turn_id = resolved_turn_id
         await self.send_event(make_event(EVENT_STT_FINAL, payload))
         return resolved_turn_id

@@ -222,8 +222,12 @@
     },
     {
       "tool_id": "image.analyse",
-      "name": "Image Analyse",
-      "description": "Analyse an image and return a structured summary, direct answer, OCR text, and detected objects.",
+      "name": "Analyze an existing image",
+      "description": "Answer a question about an existing image. Does not capture the desktop or camera. Use the exact image_ref supplied by the user or returned by an image producer.",
+      "source": "image",
+      "use_for": ["describe an image", "read visible text"],
+      "not_for": ["capturing a new screenshot"],
+      "requires": [{"argument": "image_ref", "artifact_type": "image", "must_exist": true}],
       "version": "2.0.0",
       "input_schema": {
         "type": "object",
@@ -303,6 +307,10 @@
     },
     {
       "tool_id": "video.analyse",
+      "source": "video_file",
+      "use_for": ["analyze a provided video file"],
+      "not_for": ["reading a video title in a browser window"],
+      "requires": [{"argument": "video_ref", "artifact_type": "video", "must_exist": true}],
       "name": "Video Analyse",
       "description": "Analyse a video by adaptively sampling frames over time, transcribing audio, and returning a structured summary, direct answer, OCR text, detected objects, transcript, and a keyframe timeline.",
       "version": "1.1.0",
@@ -415,8 +423,12 @@
     },
     {
       "tool_id": "vision.observe",
-      "name": "Vision Observe",
-      "description": "Observe the live vision broker state by analyzing the latest, stable, recent, or watched camera frames without reopening the camera.",
+      "name": "Observe live camera frames",
+      "description": "Analyze frames from the configured CAMERA broker. Requires an active camera stream. Cannot see desktop windows, monitors, or browser content; use computer.screenshot then image.analyse for those.",
+      "source": "camera",
+      "use_for": ["observe the camera scene"],
+      "not_for": ["desktop screenshots", "browser windows"],
+      "requires": [{"resource": "active_camera_broker"}],
       "version": "0.1.0",
       "input_schema": {
         "type": "object",
@@ -566,8 +578,13 @@
     },
     {
       "tool_id": "ui.predict_coords",
-      "name": "UI Predict Coordinates",
-      "description": "Run UI grounding over an image and return the raw JSON from the model.",
+      "name": "Locate a clickable UI element",
+      "description": "Find the clickable center of a named UI element in an existing screenshot. Returns screen-pixel x/y coordinates for computer.click. Use this for buttons, links, fields, icons, menus, and other visual desktop targets; image.analyse does not return reliable click coordinates.",
+      "source": "image",
+      "use_for": ["locate UI element coordinates", "ground a click target", "find a button or icon in a screenshot"],
+      "not_for": ["general image description", "capturing a screenshot", "clicking without a screenshot"],
+      "requires": [{"argument": "image_ref", "artifact_type": "image", "must_exist": true}],
+      "produces": [{"artifact_type": "screen_coordinates", "fields": ["json.x", "json.y"]}],
       "version": "1.0.0",
       "input_schema": {
         "type": "object",
@@ -603,12 +620,12 @@
               "x": {
                 "type": "number",
                 "minimum": 0,
-                "maximum": 1000
+                "description": "Desktop x coordinate in pixels"
               },
               "y": {
                 "type": "number",
                 "minimum": 0,
-                "maximum": 1000
+                "description": "Desktop y coordinate in pixels"
               },
               "confidence": {
                 "type": "number",
@@ -663,6 +680,643 @@
       "sandbox_profile": {
         "network": false,
         "fs": "read"
+      }
+    },
+    {
+      "tool_id": "computer.screenshot",
+      "name": "Capture desktop screen",
+      "source": "desktop",
+      "use_for": ["capture current monitor contents", "capture a desktop region"],
+      "not_for": ["camera observation"],
+      "produces": [{"field": "image_ref", "artifact_type": "image", "source": "desktop"}],
+      "description": "Capture the current desktop screen or a region and save it to the workspace. Before visual clicking on Wayland, set prepare_input=true to grant desktop control before capturing. Use a full screenshot for click coordinates.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prepare_input": {
+            "type": "boolean",
+            "description": "Grant Wayland portal input control before the screenshot; ignored on X11 and Windows.",
+            "default": false
+          },
+          "path": {
+            "type": "string"
+          },
+          "region": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer"
+              },
+              "y": {
+                "type": "integer"
+              },
+              "width": {
+                "type": "integer"
+              },
+              "height": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "image_ref": {
+            "type": "string"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "image_ref",
+          "width",
+          "height"
+        ],
+        "additionalProperties": false
+      },
+      "dependencies": [
+        "pyautogui"
+      ],
+      "capabilities": [
+        "read",
+        "screen",
+        "computer"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 3000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "write"
+      }
+    },
+    {
+      "tool_id": "computer.click",
+      "name": "Computer Click",
+      "description": "Click the desktop pointer at known screen-pixel coordinates. If the user did not supply x/y, first capture a fresh screenshot and use ui.predict_coords; never ask image.analyse for click coordinates or guess them.",
+      "source": "desktop",
+      "use_for": ["click known screen coordinates"],
+      "requires": [{"artifact_type": "screen_coordinates", "when": "x and y were not explicitly supplied by the user"}],
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          },
+          "button": {
+            "type": "string"
+          },
+          "clicks": {
+            "type": "integer"
+          },
+          "interval": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          },
+          "button": {
+            "type": "string"
+          },
+          "clicks": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "button",
+          "clicks"
+        ],
+        "additionalProperties": false
+      },
+      "dependencies": [
+        "pyautogui"
+      ],
+      "capabilities": [
+        "write",
+        "screen",
+        "computer",
+        "automation"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 3000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "computer.move",
+      "name": "Computer Move",
+      "description": "Move the desktop pointer to screen coordinates.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          },
+          "duration": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          },
+          "duration": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "duration"
+        ],
+        "additionalProperties": false
+      },
+      "dependencies": [
+        "pyautogui"
+      ],
+      "capabilities": [
+        "write",
+        "screen",
+        "computer",
+        "automation"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 3000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "computer.drag",
+      "name": "Computer Drag",
+      "description": "Drag the desktop pointer between screen coordinates.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer"
+              },
+              "y": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ],
+            "additionalProperties": false
+          },
+          "end": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer"
+              },
+              "y": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ],
+            "additionalProperties": false
+          },
+          "button": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "object"
+          },
+          "end": {
+            "type": "object"
+          },
+          "button": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "button",
+          "duration"
+        ],
+        "additionalProperties": false
+      },
+      "dependencies": [
+        "pyautogui"
+      ],
+      "capabilities": [
+        "write",
+        "screen",
+        "computer",
+        "automation"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 3000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "computer.type",
+      "name": "Computer Type",
+      "description": "Type text into the currently focused desktop application.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "interval": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "character_count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "character_count"
+        ],
+        "additionalProperties": false
+      },
+      "dependencies": [
+        "pyautogui"
+      ],
+      "capabilities": [
+        "write",
+        "screen",
+        "computer",
+        "automation"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 3000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "computer.hotkey",
+      "name": "Computer Hotkey",
+      "description": "Press a keyboard shortcut in the currently focused desktop application.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "keys"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "keys"
+        ],
+        "additionalProperties": false
+      },
+      "dependencies": [
+        "pyautogui"
+      ],
+      "capabilities": [
+        "write",
+        "screen",
+        "computer",
+        "automation"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 3000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "computer.scroll",
+      "name": "Computer Scroll",
+      "description": "Scroll the currently focused desktop application.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "amount": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "amount"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "amount": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "amount"
+        ],
+        "additionalProperties": false
+      },
+      "dependencies": [
+        "pyautogui"
+      ],
+      "capabilities": [
+        "write",
+        "screen",
+        "computer",
+        "automation"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 3000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "computer.focus_window",
+      "name": "Computer Focus Window",
+      "description": "Focus a desktop window whose title contains the supplied text.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "match_count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "title",
+          "match_count"
+        ],
+        "additionalProperties": false
+      },
+      "dependencies": [
+        "pygetwindow"
+      ],
+      "capabilities": [
+        "write",
+        "screen",
+        "computer",
+        "automation"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 3000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
+      }
+    },
+    {
+      "tool_id": "computer.launch_application",
+      "name": "Computer Launch Application",
+      "description": "Launch a desktop application without invoking a shell.",
+      "version": "1.0.0",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "env": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "pid": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command",
+          "cwd",
+          "pid"
+        ],
+        "additionalProperties": false
+      },
+      "dependencies": [],
+      "capabilities": [
+        "execute",
+        "process",
+        "computer",
+        "automation"
+      ],
+      "risk_level_default": "HIGH",
+      "required_permissions": [
+        "tier2"
+      ],
+      "examples": [],
+      "timeouts_ms": 15000,
+      "resource_limits": {
+        "cpu_ms": 3000,
+        "mem_mb": 256
+      },
+      "sandbox_profile": {
+        "network": false,
+        "fs": "none"
       }
     },
     {
@@ -1115,1989 +1769,6 @@
       },
       "sandbox_profile": {
         "network": true,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "ui.screenshot",
-      "name": "UI Screenshot",
-      "description": "Capture a screenshot (full screen or region) and save to workspace.",
-      "version": "1.0.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string"
-          },
-          "region": {
-            "type": "object",
-            "properties": {
-              "x": {
-                "type": "integer"
-              },
-              "y": {
-                "type": "integer"
-              },
-              "width": {
-                "type": "integer"
-              },
-              "height": {
-                "type": "integer"
-              }
-            },
-            "required": [
-              "x",
-              "y",
-              "width",
-              "height"
-            ]
-          }
-        },
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "image_ref": {
-            "type": "string"
-          },
-          "width": {
-            "type": "integer"
-          },
-          "height": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "image_ref",
-          "width",
-          "height"
-        ]
-      },
-      "capabilities": [
-        "read",
-        "ui"
-      ],
-      "risk_level_default": "MEDIUM",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "region": {
-              "x": 0,
-              "y": 0,
-              "width": 800,
-              "height": 600
-            }
-          },
-          "output": {
-            "image_ref": "workspace:/screenshots/shot.png",
-            "width": 800,
-            "height": 600
-          }
-        }
-      ],
-      "timeouts_ms": 5000,
-      "resource_limits": {
-        "cpu_ms": 500,
-        "mem_mb": 256
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "write"
-      }
-    },
-    {
-      "tool_id": "ui.click",
-      "name": "UI Click",
-      "description": "Click at screen coordinates.",
-      "version": "1.0.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "x": {
-            "type": "integer"
-          },
-          "y": {
-            "type": "integer"
-          },
-          "button": {
-            "type": "string"
-          },
-          "clicks": {
-            "type": "integer"
-          },
-          "interval": {
-            "type": "number"
-          }
-        },
-        "required": [
-          "x",
-          "y"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "clicked": {
-            "type": "boolean"
-          },
-          "x": {
-            "type": "integer"
-          },
-          "y": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "clicked",
-          "x",
-          "y"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "x": 100,
-            "y": 200
-          },
-          "output": {
-            "clicked": true,
-            "x": 100,
-            "y": 200
-          }
-        }
-      ],
-      "timeouts_ms": 2000,
-      "resource_limits": {
-        "cpu_ms": 200,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "ui.move",
-      "name": "UI Move",
-      "description": "Move the mouse to coordinates.",
-      "version": "1.0.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "x": {
-            "type": "integer"
-          },
-          "y": {
-            "type": "integer"
-          },
-          "duration": {
-            "type": "number"
-          }
-        },
-        "required": [
-          "x",
-          "y"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "moved": {
-            "type": "boolean"
-          },
-          "x": {
-            "type": "integer"
-          },
-          "y": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "moved",
-          "x",
-          "y"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "x": 100,
-            "y": 200,
-            "duration": 0.2
-          },
-          "output": {
-            "moved": true,
-            "x": 100,
-            "y": 200
-          }
-        }
-      ],
-      "timeouts_ms": 2000,
-      "resource_limits": {
-        "cpu_ms": 200,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "ui.drag",
-      "name": "UI Drag",
-      "description": "Drag the mouse from start to end coordinates.",
-      "version": "1.0.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "start": {
-            "type": "object",
-            "properties": {
-              "x": {
-                "type": "integer"
-              },
-              "y": {
-                "type": "integer"
-              }
-            },
-            "required": [
-              "x",
-              "y"
-            ]
-          },
-          "end": {
-            "type": "object",
-            "properties": {
-              "x": {
-                "type": "integer"
-              },
-              "y": {
-                "type": "integer"
-              }
-            },
-            "required": [
-              "x",
-              "y"
-            ]
-          },
-          "duration": {
-            "type": "number"
-          },
-          "button": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "start",
-          "end"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "dragged": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "dragged"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "start": {
-              "x": 100,
-              "y": 200
-            },
-            "end": {
-              "x": 300,
-              "y": 200
-            }
-          },
-          "output": {
-            "dragged": true
-          }
-        }
-      ],
-      "timeouts_ms": 3000,
-      "resource_limits": {
-        "cpu_ms": 200,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "ui.type",
-      "name": "UI Type",
-      "description": "Type text at the current cursor focus.",
-      "version": "1.0.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "text": {
-            "type": "string"
-          },
-          "interval": {
-            "type": "number"
-          }
-        },
-        "required": [
-          "text"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "typed": {
-            "type": "boolean"
-          },
-          "chars": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "typed",
-          "chars"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "text": "hello"
-          },
-          "output": {
-            "typed": true,
-            "chars": 5
-          }
-        }
-      ],
-      "timeouts_ms": 5000,
-      "resource_limits": {
-        "cpu_ms": 200,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "ui.hotkey",
-      "name": "UI Hotkey",
-      "description": "Press a hotkey combo.",
-      "version": "1.0.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "keys": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "required": [
-          "keys"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "hotkey": {
-            "type": "array"
-          }
-        },
-        "required": [
-          "hotkey"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "keys": [
-              "alt",
-              "f4"
-            ]
-          },
-          "output": {
-            "hotkey": [
-              "alt",
-              "f4"
-            ]
-          }
-        }
-      ],
-      "timeouts_ms": 2000,
-      "resource_limits": {
-        "cpu_ms": 200,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "ui.scroll",
-      "name": "UI Scroll",
-      "description": "Scroll the mouse wheel by amount.",
-      "version": "1.0.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "amount": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "amount"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "scrolled": {
-            "type": "boolean"
-          },
-          "amount": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "scrolled",
-          "amount"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "amount": -500
-          },
-          "output": {
-            "scrolled": true,
-            "amount": -500
-          }
-        }
-      ],
-      "timeouts_ms": 2000,
-      "resource_limits": {
-        "cpu_ms": 200,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "ui.focus_window",
-      "name": "UI Focus Window",
-      "description": "Focus a window whose title contains the given text.",
-      "version": "1.0.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "title": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "title"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "focused": {
-            "type": "boolean"
-          },
-          "title": {
-            "type": "string"
-          },
-          "error": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "focused"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "title": "Chrome"
-          },
-          "output": {
-            "focused": true,
-            "title": "Chrome"
-          }
-        }
-      ],
-      "timeouts_ms": 2000,
-      "resource_limits": {
-        "cpu_ms": 200,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "ui.list_applications",
-      "name": "UI List Applications",
-      "description": "List desktop applications that are explicitly allowlisted for launch on the current host.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "platform": {
-            "type": "string"
-          },
-          "catalog_path": {
-            "type": "string"
-          },
-          "catalog_exists": {
-            "type": "boolean"
-          },
-          "count": {
-            "type": "integer"
-          },
-          "applications": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "app_id": {
-                  "type": "string"
-                },
-                "name": {
-                  "type": "string"
-                },
-                "description": {
-                  "type": "string"
-                },
-                "aliases": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              },
-              "required": [
-                "app_id",
-                "name",
-                "description",
-                "aliases"
-              ]
-            }
-          },
-          "error": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "platform",
-          "catalog_path",
-          "catalog_exists",
-          "count",
-          "applications"
-        ]
-      },
-      "capabilities": [
-        "read",
-        "ui",
-        "applications"
-      ],
-      "risk_level_default": "LOW",
-      "required_permissions": [
-        "tier0"
-      ],
-      "examples": [
-        {
-          "input": {},
-          "output": {
-            "platform": "wsl",
-            "catalog_path": "workspace:/config/app_launchers.json",
-            "catalog_exists": true,
-            "count": 2,
-            "applications": [
-              {
-                "app_id": "notepad",
-                "name": "Notepad",
-                "description": "Windows text editor.",
-                "aliases": [
-                  "text_editor"
-                ]
-              }
-            ]
-          }
-        }
-      ],
-      "timeouts_ms": 1000,
-      "resource_limits": {
-        "cpu_ms": 100,
-        "mem_mb": 32
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "read"
-      }
-    },
-    {
-      "tool_id": "ui.open_application",
-      "name": "UI Open Application",
-      "description": "Launch an explicitly allowlisted desktop application by app_id.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "app_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "app_id"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "app_id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "platform": {
-            "type": "string"
-          },
-          "launched": {
-            "type": "boolean"
-          },
-          "pid": {
-            "type": "integer"
-          },
-          "command": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "required": [
-          "app_id",
-          "name",
-          "platform",
-          "launched"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "ui",
-        "applications"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "app_id": "notepad"
-          },
-          "output": {
-            "app_id": "notepad",
-            "name": "Notepad",
-            "platform": "wsl",
-            "launched": true
-          }
-        }
-      ],
-      "timeouts_ms": 5000,
-      "resource_limits": {
-        "cpu_ms": 300,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "embodiment.describe_host",
-      "name": "Embodiment Describe Host",
-      "description": "Discover the current host, peripherals, and normalized embodiment capabilities.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "host": {
-            "type": "object"
-          },
-          "devices": {
-            "type": "array"
-          },
-          "capabilities": {
-            "type": "array"
-          },
-          "summary": {
-            "type": "object"
-          }
-        },
-        "required": [
-          "host",
-          "devices",
-          "capabilities",
-          "summary"
-        ]
-      },
-      "capabilities": [
-        "read",
-        "embodiment",
-        "hardware"
-      ],
-      "risk_level_default": "LOW",
-      "required_permissions": [
-        "tier0"
-      ],
-      "examples": [
-        {
-          "input": {},
-          "output": {
-            "host": {
-              "host_id": "host:local"
-            },
-            "devices": [],
-            "capabilities": [],
-            "summary": {
-              "device_count": 0,
-              "capability_count": 0
-            }
-          }
-        }
-      ],
-      "timeouts_ms": 3000,
-      "resource_limits": {
-        "cpu_ms": 300,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "read"
-      }
-    },
-    {
-      "tool_id": "embodiment.list_capabilities",
-      "name": "Embodiment List Capabilities",
-      "description": "List normalized host capabilities, their safety classes, and their mapped tools.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "host_id": {
-            "type": "string"
-          },
-          "capabilities": {
-            "type": "array"
-          },
-          "summary": {
-            "type": "object"
-          }
-        },
-        "required": [
-          "host_id",
-          "capabilities",
-          "summary"
-        ]
-      },
-      "capabilities": [
-        "read",
-        "embodiment",
-        "hardware"
-      ],
-      "risk_level_default": "LOW",
-      "required_permissions": [
-        "tier0"
-      ],
-      "examples": [
-        {
-          "input": {},
-          "output": {
-            "host_id": "host:local",
-            "capabilities": [],
-            "summary": {
-              "capability_count": 0
-            }
-          }
-        }
-      ],
-      "timeouts_ms": 3000,
-      "resource_limits": {
-        "cpu_ms": 300,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "read"
-      }
-    },
-    {
-      "tool_id": "embodiment.get_state",
-      "name": "Embodiment Get State",
-      "description": "Return lightweight current host state such as screen, audio, power, network, and robot connectivity.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "host_id": {
-            "type": "string"
-          },
-          "ts": {
-            "type": "string"
-          },
-          "interface_mode": {
-            "type": "string"
-          },
-          "headless": {
-            "type": "boolean"
-          },
-          "screen": {
-            "type": "object"
-          },
-          "audio": {
-            "type": "object"
-          },
-          "vision": {
-            "type": "object"
-          },
-          "power": {
-            "type": "object"
-          },
-          "network": {
-            "type": "object"
-          },
-          "robot": {
-            "type": "object"
-          },
-          "capability_summary": {
-            "type": "object"
-          }
-        },
-        "required": [
-          "host_id",
-          "ts",
-          "interface_mode",
-          "headless",
-          "screen",
-          "audio",
-          "vision",
-          "power",
-          "network",
-          "robot",
-          "capability_summary"
-        ]
-      },
-      "capabilities": [
-        "read",
-        "embodiment",
-        "hardware"
-      ],
-      "risk_level_default": "LOW",
-      "required_permissions": [
-        "tier0"
-      ],
-      "examples": [
-        {
-          "input": {},
-          "output": {
-            "host_id": "host:local",
-            "ts": "2026-03-18T00:00:00Z",
-            "interface_mode": "local",
-            "headless": false,
-            "screen": {},
-            "audio": {},
-            "vision": {},
-            "power": {},
-            "network": {},
-            "robot": {
-              "detected": false
-            },
-            "capability_summary": {
-              "capability_count": 0
-            }
-          }
-        }
-      ],
-      "timeouts_ms": 3000,
-      "resource_limits": {
-        "cpu_ms": 300,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "read"
-      }
-    },
-    {
-      "tool_id": "embodiment.screen_capture",
-      "name": "Embodiment Screen Capture",
-      "description": "Capture the current screen through the embodiment desktop adapter and save it to the workspace.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string"
-          },
-          "region": {
-            "type": "object",
-            "properties": {
-              "x": {
-                "type": "integer"
-              },
-              "y": {
-                "type": "integer"
-              },
-              "width": {
-                "type": "integer"
-              },
-              "height": {
-                "type": "integer"
-              }
-            },
-            "required": [
-              "x",
-              "y",
-              "width",
-              "height"
-            ]
-          }
-        },
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "image_ref": {
-            "type": "string"
-          },
-          "width": {
-            "type": "integer"
-          },
-          "height": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "image_ref",
-          "width",
-          "height"
-        ]
-      },
-      "capabilities": [
-        "read",
-        "embodiment",
-        "ui"
-      ],
-      "risk_level_default": "MEDIUM",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {},
-          "output": {
-            "image_ref": "workspace:/screenshots/screenshot.png",
-            "width": 1920,
-            "height": 1080
-          }
-        }
-      ],
-      "timeouts_ms": 5000,
-      "resource_limits": {
-        "cpu_ms": 500,
-        "mem_mb": 256
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "write"
-      }
-    },
-    {
-      "tool_id": "embodiment.pointer_click",
-      "name": "Embodiment Pointer Click",
-      "description": "Click the desktop pointer through the embodiment desktop adapter.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "x": {
-            "type": "integer"
-          },
-          "y": {
-            "type": "integer"
-          },
-          "button": {
-            "type": "string"
-          },
-          "clicks": {
-            "type": "integer"
-          },
-          "interval": {
-            "type": "number"
-          }
-        },
-        "required": [
-          "x",
-          "y"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "clicked": {
-            "type": "boolean"
-          },
-          "x": {
-            "type": "integer"
-          },
-          "y": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "clicked",
-          "x",
-          "y"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "embodiment",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "x": 100,
-            "y": 200
-          },
-          "output": {
-            "clicked": true,
-            "x": 100,
-            "y": 200
-          }
-        }
-      ],
-      "timeouts_ms": 2000,
-      "resource_limits": {
-        "cpu_ms": 200,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "embodiment.keyboard_type",
-      "name": "Embodiment Keyboard Type",
-      "description": "Type text through the embodiment desktop adapter.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "text": {
-            "type": "string"
-          },
-          "interval": {
-            "type": "number"
-          }
-        },
-        "required": [
-          "text"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "typed": {
-            "type": "boolean"
-          },
-          "chars": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "typed",
-          "chars"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "embodiment",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "text": "hello"
-          },
-          "output": {
-            "typed": true,
-            "chars": 5
-          }
-        }
-      ],
-      "timeouts_ms": 5000,
-      "resource_limits": {
-        "cpu_ms": 200,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "embodiment.window_focus",
-      "name": "Embodiment Window Focus",
-      "description": "Focus a desktop window through the embodiment desktop adapter.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "title": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "title"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "focused": {
-            "type": "boolean"
-          },
-          "title": {
-            "type": "string"
-          },
-          "error": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "focused"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "embodiment",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "title": "Browser"
-          },
-          "output": {
-            "focused": true,
-            "title": "Browser"
-          }
-        }
-      ],
-      "timeouts_ms": 2000,
-      "resource_limits": {
-        "cpu_ms": 200,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "embodiment.camera_capture",
-      "name": "Embodiment Camera Capture",
-      "description": "Capture a single camera frame through the embodiment camera adapter and save it to the workspace.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string"
-          },
-          "camera_index": {
-            "type": "integer"
-          },
-          "width": {
-            "type": "integer"
-          },
-          "height": {
-            "type": "integer"
-          }
-        },
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "image_ref": {
-            "type": "string"
-          },
-          "width": {
-            "type": "integer"
-          },
-          "height": {
-            "type": "integer"
-          },
-          "camera_index": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "image_ref",
-          "width",
-          "height",
-          "camera_index"
-        ]
-      },
-      "capabilities": [
-        "read",
-        "embodiment",
-        "camera"
-      ],
-      "risk_level_default": "MEDIUM",
-      "required_permissions": [
-        "tier1"
-      ],
-      "examples": [
-        {
-          "input": {
-            "camera_index": 0
-          },
-          "output": {
-            "image_ref": "workspace:/camera/frame.jpg",
-            "width": 1280,
-            "height": 720,
-            "camera_index": 0
-          }
-        }
-      ],
-      "timeouts_ms": 5000,
-      "resource_limits": {
-        "cpu_ms": 500,
-        "mem_mb": 256
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "write"
-      }
-    },
-    {
-      "tool_id": "embodiment.list_fallbacks",
-      "name": "Embodiment List Fallbacks",
-      "description": "Return LLM-codegen fallback candidates for embodiment capabilities that are detected but do not have an available explicit low-level implementation.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "host_id": {
-            "type": "string"
-          },
-          "fallbacks": {
-            "type": "array"
-          }
-        },
-        "required": [
-          "host_id",
-          "fallbacks"
-        ]
-      },
-      "capabilities": [
-        "read",
-        "embodiment"
-      ],
-      "risk_level_default": "LOW",
-      "required_permissions": [
-        "tier0"
-      ],
-      "examples": [
-        {
-          "input": {},
-          "output": {
-            "host_id": "host:local",
-            "fallbacks": []
-          }
-        }
-      ],
-      "timeouts_ms": 2000,
-      "resource_limits": {
-        "cpu_ms": 200,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "read"
-      }
-    },
-    {
-      "tool_id": "embodiment.phone_screen_capture",
-      "name": "Embodiment Phone Screen Capture",
-      "description": "Capture the current screen from a connected Android phone through the explicit phone adapter and save it to the workspace.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "serial": {
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          }
-        },
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "image_ref": {
-            "type": "string"
-          },
-          "width": {
-            "type": "integer"
-          },
-          "height": {
-            "type": "integer"
-          },
-          "serial": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "image_ref"
-        ]
-      },
-      "capabilities": [
-        "read",
-        "embodiment",
-        "phone",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {},
-          "output": {
-            "image_ref": "workspace:/phone/screenshot.png",
-            "width": 1080,
-            "height": 2400
-          }
-        }
-      ],
-      "timeouts_ms": 10000,
-      "resource_limits": {
-        "cpu_ms": 1000,
-        "mem_mb": 256
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "write"
-      }
-    },
-    {
-      "tool_id": "embodiment.phone_tap",
-      "name": "Embodiment Phone Tap",
-      "description": "Tap coordinates on a connected Android phone through the explicit phone adapter.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "serial": {
-            "type": "string"
-          },
-          "x": {
-            "type": "integer"
-          },
-          "y": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "x",
-          "y"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "tapped": {
-            "type": "boolean"
-          },
-          "x": {
-            "type": "integer"
-          },
-          "y": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "tapped"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "embodiment",
-        "phone",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "x": 100,
-            "y": 200
-          },
-          "output": {
-            "tapped": true,
-            "x": 100,
-            "y": 200
-          }
-        }
-      ],
-      "timeouts_ms": 4000,
-      "resource_limits": {
-        "cpu_ms": 300,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "embodiment.phone_swipe",
-      "name": "Embodiment Phone Swipe",
-      "description": "Swipe between two points on a connected Android phone through the explicit phone adapter.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "serial": {
-            "type": "string"
-          },
-          "start": {
-            "type": "object",
-            "properties": {
-              "x": {
-                "type": "integer"
-              },
-              "y": {
-                "type": "integer"
-              }
-            },
-            "required": [
-              "x",
-              "y"
-            ]
-          },
-          "end": {
-            "type": "object",
-            "properties": {
-              "x": {
-                "type": "integer"
-              },
-              "y": {
-                "type": "integer"
-              }
-            },
-            "required": [
-              "x",
-              "y"
-            ]
-          },
-          "duration_ms": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "start",
-          "end"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "swiped": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "swiped"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "embodiment",
-        "phone",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "start": {
-              "x": 100,
-              "y": 300
-            },
-            "end": {
-              "x": 100,
-              "y": 900
-            }
-          },
-          "output": {
-            "swiped": true
-          }
-        }
-      ],
-      "timeouts_ms": 5000,
-      "resource_limits": {
-        "cpu_ms": 300,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "embodiment.phone_type",
-      "name": "Embodiment Phone Type",
-      "description": "Type text on a connected Android phone through the explicit phone adapter.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "serial": {
-            "type": "string"
-          },
-          "text": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "text"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "typed": {
-            "type": "boolean"
-          },
-          "chars": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "typed"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "embodiment",
-        "phone",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "text": "hello"
-          },
-          "output": {
-            "typed": true,
-            "chars": 5
-          }
-        }
-      ],
-      "timeouts_ms": 5000,
-      "resource_limits": {
-        "cpu_ms": 300,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "embodiment.phone_launch_app",
-      "name": "Embodiment Phone Launch App",
-      "description": "Launch or focus an app on a connected Android phone through the explicit phone adapter.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "serial": {
-            "type": "string"
-          },
-          "package": {
-            "type": "string"
-          },
-          "activity": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "package"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "launched": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "launched"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "embodiment",
-        "phone",
-        "ui"
-      ],
-      "risk_level_default": "HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "package": "com.android.settings"
-          },
-          "output": {
-            "launched": true
-          }
-        }
-      ],
-      "timeouts_ms": 8000,
-      "resource_limits": {
-        "cpu_ms": 500,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "embodiment.robot_get_state",
-      "name": "Embodiment Robot Get State",
-      "description": "Return the current detected robot transport, topics, and bridge availability through the explicit robot adapter.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "detected": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "detected"
-        ]
-      },
-      "capabilities": [
-        "read",
-        "embodiment",
-        "robot"
-      ],
-      "risk_level_default": "LOW",
-      "required_permissions": [
-        "tier0"
-      ],
-      "examples": [
-        {
-          "input": {},
-          "output": {
-            "detected": false
-          }
-        }
-      ],
-      "timeouts_ms": 3000,
-      "resource_limits": {
-        "cpu_ms": 200,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "read"
-      }
-    },
-    {
-      "tool_id": "embodiment.robot_move_joint",
-      "name": "Embodiment Robot Move Joint",
-      "description": "Send a single joint target command to the detected robot controller through the explicit robot adapter.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "joint": {
-            "type": "string"
-          },
-          "position": {
-            "type": "number"
-          },
-          "velocity": {
-            "type": "number"
-          }
-        },
-        "required": [
-          "joint",
-          "position"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "queued": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "queued"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "embodiment",
-        "robot"
-      ],
-      "risk_level_default": "VERY_HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "joint": "shoulder_pan",
-            "position": 1.2
-          },
-          "output": {
-            "queued": true
-          }
-        }
-      ],
-      "timeouts_ms": 5000,
-      "resource_limits": {
-        "cpu_ms": 300,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
-        "fs": "none"
-      }
-    },
-    {
-      "tool_id": "embodiment.robot_set_gripper",
-      "name": "Embodiment Robot Set Gripper",
-      "description": "Send a gripper command to the detected robot controller through the explicit robot adapter.",
-      "version": "0.1.0",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "state": {
-            "type": "string"
-          },
-          "width": {
-            "type": "number"
-          },
-          "force": {
-            "type": "number"
-          }
-        },
-        "required": [
-          "state"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object",
-        "properties": {
-          "queued": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "queued"
-        ]
-      },
-      "capabilities": [
-        "write",
-        "embodiment",
-        "robot"
-      ],
-      "risk_level_default": "VERY_HIGH",
-      "required_permissions": [
-        "tier2"
-      ],
-      "examples": [
-        {
-          "input": {
-            "state": "open"
-          },
-          "output": {
-            "queued": true
-          }
-        }
-      ],
-      "timeouts_ms": 5000,
-      "resource_limits": {
-        "cpu_ms": 300,
-        "mem_mb": 64
-      },
-      "sandbox_profile": {
-        "network": false,
         "fs": "none"
       }
     },

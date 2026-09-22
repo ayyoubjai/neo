@@ -10,7 +10,7 @@ from common.llm_json_log import record_llm_json
 from common.record_log import record_event
 from model_server.hf_client import HfError, generate_vision as hf_generate_vision
 from model_server.ollama_client import OllamaError, generate_raw as ollama_generate_raw, provider
-from model_server.llamacpp_client import LlamacppError, generate_raw as llamacpp_generate_raw
+from model_server.llamacpp_client import LlamacppError, generate as llamacpp_generate
 from tool_runtime.sandbox import SandboxViolation, resolve_workspace_path
 
 
@@ -72,9 +72,31 @@ def _build_prompt(query: str, image_w: int, image_h: int) -> str:
     return (
         "Return strict JSON only.\n"
         "Schema: {\"x\": 0-1000, \"y\": 0-1000, \"confidence\": 0-1}.\n"
+        "Coordinates are normalized relative to the entire supplied image: top-left is (0,0), "
+        "bottom-right is (1000,1000). Return the clickable center of exactly one target.\n"
         "confidence is independent and must be in [0,1] (not 0-1000).\n"
+        f"Original image size is {image_w}x{image_h}; still return normalized coordinates.\n"
         f"Target: {query}\n"
     )
+
+
+def _validate_point(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    x = payload.get("x")
+    y = payload.get("y")
+    if (not isinstance(x, (int, float)) or isinstance(x, bool)
+            or not isinstance(y, (int, float)) or isinstance(y, bool)):
+        return {}, "UI grounding response must contain numeric x and y coordinates."
+    if not (0 <= float(x) <= 1000 and 0 <= float(y) <= 1000):
+        return {}, "UI grounding x and y must be normalized to the 0-1000 range."
+    result = dict(payload)
+    result["x"] = float(x)
+    result["y"] = float(y)
+    confidence = result.get("confidence")
+    if confidence is not None:
+        if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+            return {}, "UI grounding confidence must be numeric."
+        result["confidence"] = max(0.0, min(1.0, float(confidence)))
+    return result, ""
 
 
 def _analyze_ollama(image_ref: str, query: str) -> Dict[str, Any]:
@@ -168,9 +190,9 @@ def _analyze_ollama(image_ref: str, query: str) -> Dict[str, Any]:
 
 def _analyze_llamacpp(image_ref: str, query: str) -> Dict[str, Any]:
     settings = load_settings()
-    model = settings.models.get("ui_grounding_model", "")
+    model = settings.models.get("ui_grounding_model", "") or settings.models.get("vision_model", "")
     if not model:
-        return _error_output(image_ref, "models.ui_grounding_model is empty in settings.")
+        return _error_output(image_ref, "models.ui_grounding_model and models.vision_model are empty in settings.")
     timeout_s = settings.models.get("vision_timeout_s", settings.models.get("llamacpp_timeout_s", 60))
     enforce_json = bool(settings.models.get("ui_grounding_enforce_json", False))
     disable_thinking = bool(settings.models.get("ui_grounding_disable_thinking", False))
@@ -200,13 +222,14 @@ def _analyze_llamacpp(image_ref: str, query: str) -> Dict[str, Any]:
                 continue
             model_options[key.strip()] = value
     try:
-        resp = llamacpp_generate_raw(
+        raw_output = llamacpp_generate(
             prompt,
             model,
             images=[image_b64],
             options=model_options,
             timeout=timeout_s,
             response_format="json" if enforce_json else None,
+            use_thinking_on_empty=use_thinking_on_empty,
         )
     except LlamacppError as e:
         log_exception(
@@ -216,10 +239,6 @@ def _analyze_llamacpp(image_ref: str, query: str) -> Dict[str, Any]:
         )
         return _error_output(image_ref, f"llamacpp UI grounding failed: {e}")
 
-    response_text = resp.get("content", "")
-    if not isinstance(response_text, str):
-        response_text = ""
-    raw_output = response_text
     payload = _extract_json(raw_output)
     if not payload:
         preview = raw_output.strip().replace("\n", " ")[:300] if isinstance(raw_output, str) else ""
@@ -237,6 +256,13 @@ def _analyze_llamacpp(image_ref: str, query: str) -> Dict[str, Any]:
                 "raw_payload": {},
             }
         return _error_output(image_ref, f"UGround returned non-JSON output: {preview}", raw_output)
+
+    payload, validation_error = _validate_point(payload)
+    if validation_error:
+        log_error("ui_grounding_parse_error", {"provider": "llamacpp", "model": model,
+                  "image_ref": image_ref, "query": query, "preview": raw_output[:300],
+                  "validation_error": validation_error})
+        return _error_output(image_ref, validation_error, raw_output)
 
     record_llm_json("ui_grounding_output", {"image_ref": image_ref, "query": query, "json": payload})
     record_event("model_provider", {"provider": "llamacpp", "model": model})

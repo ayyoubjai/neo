@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Knowledge explorer</title>
+<style>
+body{font:16px system-ui,sans-serif;margin:0;color:#dae5ee;background:#101923}header{padding:24px;border-bottom:1px solid #405265}h1{margin:0 0 10px}p{line-height:1.55}button,input,select{font:inherit;padding:9px;background:#1f3041;color:inherit;border:1px solid #61788d;border-radius:5px}button{cursor:pointer;text-align:left}button:hover{background:#30495e}input{min-width:240px}main{display:grid;grid-template-columns:minmax(260px,1fr) 2fr;gap:25px;padding:24px}#list{display:flex;flex-direction:column;gap:8px}#list button{width:100%}.muted{color:#9eb1c3}.card{padding:15px;margin:12px 0;background:#1a2836;border-radius:8px;overflow-wrap:anywhere}pre{white-space:pre-wrap;font:14px ui-monospace,monospace}svg{width:100%;height:300px;background:#152330;border-radius:8px}svg text{fill:#dae5ee;font:12px system-ui}svg line{stroke:#7e9eb8;stroke-width:2}svg circle{fill:#31536d;stroke:#80b9ce}svg g{cursor:pointer}@media(max-width:750px){main{grid-template-columns:1fr}}
+#overview{padding:20px 24px;border-bottom:1px solid #405265}#graph-canvas{width:100%;height:520px;background:#152330;border:1px solid #405265;touch-action:none;border-radius:8px}#graph-controls{display:flex;gap:16px;flex-wrap:wrap;align-items:center}#graph-controls input{min-width:0}#graph-selection{max-height:160px;overflow:auto;display:flex;gap:8px;flex-wrap:wrap}#graph-selection p{width:100%}.legend{display:flex;gap:20px;flex-wrap:wrap}#graph-tooltip{min-height:48px;overflow-wrap:anywhere}button:focus-visible,canvas:focus-visible{outline:3px solid #fff}
+</style>
+<style>#graph-connections{display:flex;gap:12px 20px;flex-wrap:wrap;border:1px solid #405265;border-radius:8px;margin:16px 0;padding:12px}#graph-connections label{display:flex;align-items:center;gap:7px;cursor:pointer}#graph-connections input{min-width:0}.connection-swatch{display:inline-block;width:24px;height:3px}</style>
+<header><h1>Knowledge explorer</h1><p id="summary"></p><input id="search" aria-label="Search claims" placeholder="Search claims or speakers"><select id="view" aria-label="View"><option value="whole" selected>Whole graph</option><option value="sources">Sources</option><option value="concepts">Concepts</option><option value="assessments">Assessments</option></select><p id="view-help" class="muted"></p><p class="muted">Source claims are attributed statements. Connections are proposals; assessments are revisable judgments.</p></header>
+<section id="overview" aria-label="Whole exported graph">
+<h2>Whole graph</h2><p>Every exported claim is included, even when it has no connections. Separate clusters are disconnected components. Positions are for navigation, not measures of similarity.</p>
+<div id="graph-controls"><label><input type="checkbox" id="graph-concepts"> Concepts</label><label><input type="checkbox" id="graph-sources"> Source documents</label><label><input type="checkbox" id="graph-assessments"> Assessments</label><label><input type="checkbox" id="graph-entities"> Entities</label><label><input type="checkbox" id="graph-propositions"> Propositions</label><label><input type="checkbox" id="graph-labels"> Node labels</label><button id="graph-fit">Fit all</button><button id="graph-in" aria-label="Zoom in">+</button><button id="graph-out" aria-label="Zoom out">−</button></div>
+<p class="legend"><span style="color:#74c9ed">● Claim</span><span style="color:#b69af5">● Concept</span><span style="color:#f4be72">● Source document</span><span style="color:#8ddaac">● Assessment</span><span style="color:#ee92ba">● Entity</span><span style="color:#f0dc72">● Proposition</span></p>
+<fieldset id="graph-connections"><legend>Connection types</legend></fieldset>
+<p class="muted">Uncheck a connection type to hide its lines in the whole graph. Nodes remain visible. Connections to concepts, entities, sources, propositions, and assessments also require their node layer to be enabled.</p>
+<p id="graph-stats" aria-live="polite"></p><canvas id="graph-canvas" aria-label="Whole graph. Use the claim list below to access claim details without the canvas."></canvas><p id="graph-tooltip" class="muted">Drag to pan · Scroll to zoom · Select a node for details</p><div id="graph-selection"></div>
+<p class="muted">Offline snapshot of exported records, not the live database. Source documents and assessments link directly to claims here; passage and evidence details remain in the inspector. Shared concepts indicate a shared topic, not agreement. Entities are named referents; proposition nodes group reviewed paraphrases while preserving each attributed claim.</p>
+</section>
+<main><aside id="list"></aside><article id="detail"><p>Select a claim to trace it to its sources and evidence.</p></article></main>
+<script id="data" type="application/json">__KNOWLEDGE_DATA__</script>
+<script>
+__GRAPH_SCRIPT__
+</script>
+<script>
+'use strict';
+const data=JSON.parse(document.getElementById('data').textContent);
+const records=new Map(data.records.map(r=>[r.claim.id,r]));
+const list=document.getElementById('list'),detail=document.getElementById('detail');
+document.getElementById('summary').textContent=data.collection+' · '+records.size+' claims'+(data.truncated?' · Limited export; increase --limit to include more.':'');
+function element(tag,text,parent){const node=document.createElement(tag);node.textContent=text;if(parent)parent.appendChild(node);return node;}
+function card(title,text){const box=element('section','',detail);box.className='card';element('h3',title,box);element('pre',text,box);}
+function show(id){
+ const record=records.get(id);if(!record)return;detail.replaceChildren();
+ element('h2',record.claim.text,detail);
+ element('p',record.claim.speaker+' · '+record.claim.stance+' · '+record.claim.claim_type,detail);
+ element('p','Scope: '+record.claim.scope,detail);
+ if(record.claim.review_required)element('p','Extraction or attribution needs review.',detail);
+ const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 700 300');svg.setAttribute('aria-label','Selected claim and proposed connections');detail.appendChild(svg);
+ function shape(tag,attrs,text){const n=document.createElementNS(svg.namespaceURI,tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(text)n.textContent=text;svg.appendChild(n);return n;}
+ const neighbors=record.relationships.slice(0,8);
+ neighbors.forEach((r,index)=>{
+   const angle=index*Math.PI*2/Math.max(1,neighbors.length),x=350+250*Math.cos(angle),y=150+110*Math.sin(angle);
+   shape('line',{x1:350,y1:150,x2:x,y2:y,style:'stroke:'+connectionColor(r.relationship.kind)});
+   shape('text',{x:(350+x)/2,y:(150+y)/2,'text-anchor':'middle'},r.relationship.kind.replaceAll('_',' ').toLowerCase());
+   const dot=shape('circle',{cx:x,cy:y,r:16});dot.addEventListener('click',()=>show(r.other_id));
+   shape('text',{x,y:y+30,'text-anchor':'middle'},r.text.slice(0,30));
+ });
+ shape('circle',{cx:350,cy:150,r:25});shape('text',{x:350,y:195,'text-anchor':'middle'},'Selected claim');
+ if(record.relationships.length>8)element('p','Diagram shows the first 8 connections. All connections appear below.',detail);
+ for(const s of record.sources)card(s.document+' — '+s.location,s.quote+'\n\nExtraction confidence: '+s.extraction_confidence+'\nAttribution confidence: '+s.attribution_confidence+'\nSource hash: '+s.document_hash);
+ for(const r of record.relationships){card(r.relationship.kind+' → '+r.text,JSON.stringify(r,null,2));}
+ for(const a of record.assessments)card('Assessment: '+a.assessment.position,JSON.stringify(a,null,2));
+ if(!record.assessments.length)card('Assessment','Unassessed. Importing a statement does not endorse it.');
+ for(const context of record.context_passages||[])card('Reference context — '+context.location,context.text);
+ for(const p of record.propositions||[])card('Shared proposition',JSON.stringify(p,null,2));
+ for(const review of record.semantic_reviews||[])card('Semantic interpretation review — '+review.reviewer,JSON.stringify(review,null,2));
+ for(const r of record.archived_relationships||[])card('Retired connection (retained for audit)',JSON.stringify(r,null,2));
+ if(record.provenance)card('Evidence source provenance',JSON.stringify(record.provenance,null,2));
+ for(const r of record.extraction_reviews||[])card('Extraction review',JSON.stringify(r,null,2));
+ for(const i of record.investigations)card('Investigation: '+i.status,i.plan_json);
+}
+function refresh(){
+ list.replaceChildren();const query=document.getElementById('search').value.toLowerCase(),view=document.getElementById('view').value,groups=new Map();
+ for(const record of records.values()){
+  if(!(record.claim.text+' '+record.claim.speaker+' '+record.claim.concepts.join(' ')).toLowerCase().includes(query))continue;
+  let keys=view==='whole'?['Claims']:view==='sources'?record.sources.map(s=>s.document):view==='concepts'?record.claim.concepts:[record.assessments[0]?.assessment.position||'unassessed'];
+  if(!keys.length)keys=['Uncategorized'];
+  for(const key of new Set(keys)){if(!groups.has(key))groups.set(key,[]);groups.get(key).push(record);}
+ }
+ for(const[key,items]of [...groups].sort((a,b)=>a[0].localeCompare(b[0]))){element('h3',key,list);for(const r of items){const b=element('button',r.claim.text,list);b.addEventListener('click',()=>show(r.claim.id));}}
+ if(!groups.size)element('p','No matching claims.',list);
+}
+const overview=initOverview(data.records,show);
+function updateView(){const view=document.getElementById('view').value;document.getElementById('view-help').textContent={whole:'Whole graph shows all exported claims and their proposed connections. Optional layers add concepts, source documents, and assessments.',sources:'Sources groups claims by the document they came from. A source is provenance, not proof.',concepts:'Concepts groups claims by extracted topics. Sharing a concept does not mean two claims agree.',assessments:'Assessments groups claims by the agent’s latest recorded judgment. Unassessed means no judgment has been recorded.'}[view];view==='whole'?overview.show():overview.hide();refresh();}
+document.getElementById('search').addEventListener('input',()=>{refresh();overview.search(document.getElementById('search').value);});document.getElementById('view').addEventListener('change',updateView);updateView();
+</script></html>

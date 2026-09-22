@@ -1,0 +1,5 @@
+# Optional desktop integration. Install with Neo's own Python interpreter:
+# .venv/bin/python -m pip install -r requirements-wayland.txt
+# Requires system GTK 3 introspection, GLib/GObject development libraries,
+# Cairo, and an XDG RemoteDesktop portal backend (KDE/GNOME).
+PyGObject>=3.50; sys_platform == "linux"

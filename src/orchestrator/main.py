@@ -1,9 +1,12 @@
 import ast
 import asyncio
 import json
+import math
 import os
 import random
 import re
+import subprocess
+import sys
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -16,6 +19,7 @@ from common.jsonl import read_jsonl, write_jsonl
 from common.jsonl_rpc import RpcError, send_request
 from common.record_log import record_event
 from common.tool_metadata import redact_tool_payload
+from common.tool_recovery import contract_text, contextual_query, expand_prerequisites
 from common.system_entity import load_system_entity
 from common.time_utils import utc_now_iso
 from common.types import (
@@ -31,10 +35,13 @@ from orchestrator.context_builder import ContextBuilder
 from orchestrator.memory_manager import MemoryManager
 from orchestrator.policy import PolicyEngine, TIER_MAP
 from orchestrator.tool_selector import ToolRegistry
+from orchestrator.tool_recovery import ToolRecoveryMixin
+from orchestrator.cognition_reliability import CognitionReliabilityMixin, ACTIVE_RUN, CognitionBudgetExceeded
 
 
 _CURRENT_TURN_ID: ContextVar[Optional[str]] = ContextVar("orchestrator_current_turn_id", default=None)
 _CURRENT_TRACE_ID: ContextVar[Optional[str]] = ContextVar("orchestrator_current_trace_id", default=None)
+_CURRENT_AUTONOMY: ContextVar[Optional[dict]] = ContextVar("orchestrator_autonomy", default=None)
 PRIMARY_REASONING_MODE = "COGNITION"
 
 
@@ -50,7 +57,7 @@ class _AsiSourceSignal(Exception):
         self.payload = payload
 
 
-class Orchestrator:
+class Orchestrator(CognitionReliabilityMixin, ToolRecoveryMixin):
     def __init__(self):
         settings = load_settings()
         self._settings = settings
@@ -128,8 +135,14 @@ class Orchestrator:
         else:
             self._tool_selection_independent_from_retrieval = bool(independent_tool_selection_setting)
         self._tool_retrieval_k = int(settings.orchestrator.get("tool_retrieval_k", 8))
+        self._tool_embedding_model = str(settings.models.get("embedding_model", ""))
         if self._tool_retrieval_k < 1:
             self._tool_retrieval_k = 1
+        self._tool_retrieval_min_similarity = float(
+            settings.orchestrator.get("tool_retrieval_min_similarity", 0.3)
+        )
+        if not -1.0 <= self._tool_retrieval_min_similarity <= 1.0:
+            raise ValueError("tool_retrieval_min_similarity must be between -1 and 1")
         self._cognition_system1_max_steps = int(
             settings.orchestrator.get("cognition_system1_max_steps", 3)
         )
@@ -149,6 +162,15 @@ class Orchestrator:
         if self._cognition_action_limit < 1:
             self._cognition_action_limit = 1
         self._cognition_mode = str(settings.orchestrator.get("cognition_mode", "auto")).strip().lower()
+        system0_enabled_setting = self._coerce_optional_bool(
+            settings.orchestrator.get("cognition_system0_enabled", True)
+        )
+        self._cognition_system0_enabled = (
+            True if system0_enabled_setting is None else system0_enabled_setting
+        )
+        self._cognition_context_sources = self._normalize_cognition_context_sources(
+            settings.orchestrator.get("cognition_context_sources", "both")
+        )
         system1_clarify_setting = self._coerce_optional_bool(
             settings.orchestrator.get("cognition_system1_clarify_enabled", True)
         )
@@ -209,6 +231,21 @@ class Orchestrator:
             self._cognition_system3_rounds = 1
         if self._cognition_system3_rounds < 1:
             self._cognition_system3_rounds = 1
+        try:
+            self._cognition_system3_safety_threshold = float(
+                settings.orchestrator.get("cognition_system3_safety_threshold", 7.0)
+            )
+        except (TypeError, ValueError):
+            self._cognition_system3_safety_threshold = 7.0
+        if not 0.0 <= self._cognition_system3_safety_threshold <= 10.0:
+            self._cognition_system3_safety_threshold = 7.0
+        try:
+            self._cognition_system3_review_quorum = int(
+                settings.orchestrator.get("cognition_system3_review_quorum", 2)
+            )
+        except (TypeError, ValueError):
+            self._cognition_system3_review_quorum = 2
+        self._cognition_system3_review_quorum = max(1, self._cognition_system3_review_quorum)
         cognition_system3_parallel_setting = settings.orchestrator.get("cognition_system3_parallel", False)
         if isinstance(cognition_system3_parallel_setting, str):
             self._cognition_system3_parallel = cognition_system3_parallel_setting.strip().lower() in {
@@ -219,12 +256,6 @@ class Orchestrator:
             }
         else:
             self._cognition_system3_parallel = bool(cognition_system3_parallel_setting)
-        trivial_target_raw = str(
-            settings.orchestrator.get("cognition_trivial_query_target", "system1") or ""
-        ).strip().lower()
-        self._cognition_trivial_query_target = (
-            trivial_target_raw if trivial_target_raw in {"system0", "system1"} else "system1"
-        )
         force_system_raw = str(settings.orchestrator.get("cognition_force_system", "") or "").strip().lower()
         self._cognition_force_system = (
             force_system_raw if force_system_raw in {"system0", "system1", "system2", "system3"} else ""
@@ -250,32 +281,6 @@ class Orchestrator:
         except (TypeError, ValueError):
             self._cognition_distill_min_confidence = 0.55
         self._cognition_distill_min_confidence = max(0.0, min(1.0, self._cognition_distill_min_confidence))
-        cognition_distill_skip_trivial_setting = settings.orchestrator.get(
-            "cognition_distill_skip_trivial", True
-        )
-        if isinstance(cognition_distill_skip_trivial_setting, str):
-            self._cognition_distill_skip_trivial = (
-                cognition_distill_skip_trivial_setting.strip().lower() in {"1", "true", "yes", "on"}
-            )
-        else:
-            self._cognition_distill_skip_trivial = bool(cognition_distill_skip_trivial_setting)
-        cognition_routing_skip_trivial_setting = settings.orchestrator.get(
-            "cognition_routing_skip_trivial", False
-        )
-        if isinstance(cognition_routing_skip_trivial_setting, str):
-            self._cognition_routing_skip_trivial = (
-                cognition_routing_skip_trivial_setting.strip().lower() in {"1", "true", "yes", "on"}
-            )
-        else:
-            self._cognition_routing_skip_trivial = bool(cognition_routing_skip_trivial_setting)
-        try:
-            self._cognition_distill_trivial_max_chars = int(
-                settings.orchestrator.get("cognition_distill_trivial_max_chars", 60)
-            )
-        except (TypeError, ValueError):
-            self._cognition_distill_trivial_max_chars = 60
-        if self._cognition_distill_trivial_max_chars < 1:
-            self._cognition_distill_trivial_max_chars = 60
         try:
             self._cognition_reflections_limit = int(
                 settings.orchestrator.get("cognition_reflections_limit", 6)
@@ -314,7 +319,7 @@ class Orchestrator:
         self._memory_distill_turns = int(settings.orchestrator.get("memory_distill_turns", 12))
         if self._memory_distill_turns < 0:
             self._memory_distill_turns = 0
-        critic_enabled_setting = settings.orchestrator.get("final_response_critic_enabled", False)
+        critic_enabled_setting = settings.orchestrator.get("final_response_critic_enabled", True)
         if isinstance(critic_enabled_setting, str):
             self._final_response_critic_enabled = critic_enabled_setting.strip().lower() in {
                 "1",
@@ -478,6 +483,10 @@ class Orchestrator:
         self._pending_turns: Dict[str, str] = {}
         self._pending_turn_modes: Dict[str, str] = {}
         self._pending_turn_skip_distillation: Dict[str, bool] = {}
+        self._pending_acceptance_checks: Dict[str, List[Dict[str, Any]]] = {}
+        self._pending_cognition_resume: Dict[str, str] = {}
+        self._pending_cognition_sources: Dict[str, str] = {}
+        self._pending_autonomy_constraints: Dict[str, dict] = {}
         self._turn_context_packet: Dict[str, Dict[str, Any]] = {}
         self._inflight_task: Optional[asyncio.Task] = None
         self._inflight_turn_id: Optional[str] = None
@@ -579,6 +588,19 @@ class Orchestrator:
                 return False
         return None
 
+    @staticmethod
+    def _normalize_cognition_context_sources(value: Any) -> Set[str]:
+        if isinstance(value, str):
+            raw_values = [item.strip().lower() for item in value.split(",")]
+        elif isinstance(value, (list, tuple, set)):
+            raw_values = [str(item).strip().lower() for item in value]
+        else:
+            raw_values = []
+        sources = {item for item in raw_values if item in {"semantic", "memory"}}
+        if "both" in raw_values:
+            sources.update({"semantic", "memory"})
+        return sources
+
     def _merge_model_call_options(
         self,
         base_options: Optional[Dict[str, Any]],
@@ -645,6 +667,23 @@ class Orchestrator:
             requested_mode = self._normalize_requested_mode(payload.get("requested_mode"))
             self._pending_turn_modes[turn_id] = requested_mode or PRIMARY_REASONING_MODE
             self._pending_turn_skip_distillation[turn_id] = bool(payload.get("skip_distillation"))
+            checks = payload.get("acceptance_checks")
+            if isinstance(checks, list):
+                self._pending_acceptance_checks[turn_id] = checks
+            checkpoint = payload.get("resume_checkpoint")
+            if isinstance(checkpoint, str) and checkpoint:
+                self._pending_cognition_resume[turn_id] = checkpoint
+            self._pending_cognition_sources[turn_id] = str(payload.get("source_id") or "")
+            constraints = payload.get("autonomy_constraints")
+            if isinstance(constraints, dict):
+                try:
+                    budget = max(0, min(10, int(constraints.get("max_actions", 0))))
+                except (TypeError, ValueError, OverflowError):
+                    budget = 0
+                self._pending_autonomy_constraints[turn_id] = {
+                    "remaining": budget, "permission_policy": constraints.get("permission_policy", "deny"),
+                    "evidence": [],
+                }
             await self._start_or_restart(turn_id)
         elif event_type == EVENT_TURN_PATCH:
             turn_id = payload.get("turn_id")
@@ -687,6 +726,12 @@ class Orchestrator:
         }
         if skip_distillation:
             kwargs["skip_distillation"] = True
+        checks = getattr(self, "_pending_acceptance_checks", {}).get(turn_id)
+        if checks is not None:
+            kwargs["acceptance_checks"] = checks
+        checkpoint = getattr(self, "_pending_cognition_resume", {}).get(turn_id)
+        if checkpoint:
+            kwargs["resume_checkpoint"] = checkpoint
         return await self._run_cognition_loop(
             text,
             context_packet,
@@ -934,6 +979,8 @@ class Orchestrator:
                 if not isinstance(item, dict):
                     continue
                 lines.append(f"  - {self._truncate(self._safe_json(item), 900)}")
+        if evidence.get("observations"):
+            lines.append("Evidence with stable IDs: " + self._safe_json(evidence["observations"]))
         step_trace = evidence.get("step_trace")
         if isinstance(step_trace, list) and step_trace:
             lines.append("Step execution trace:")
@@ -954,7 +1001,11 @@ class Orchestrator:
         turn_id: str,
         query_state: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        execution_evidence = self._get_turn_execution_evidence(turn_id)
+        execution_evidence = dict(self._get_turn_execution_evidence(turn_id) or {})
+        run = getattr(self, "_cognition_runs", {}).get(turn_id)
+        if run:
+            execution_evidence["original_request"] = run["original_request"]
+            execution_evidence["observations"] = run["observations"] or run.get("tool_evidence", [])
         # If no explicit query_state was passed, try to extract it from the cognition evidence.
         if not query_state and execution_evidence and execution_evidence.get("entity_kind") == "cognition_episode":
             query_state = execution_evidence.get("entity", {}).get("query_state")
@@ -965,7 +1016,14 @@ class Orchestrator:
             execution_evidence=execution_evidence,
         )
 
-        critic_ctx = {"summary": "", "memory": [], "suppress_summary_memory": True}
+        active_turn_id = _CURRENT_TURN_ID.get()
+        turn_context = self._turn_context_packet.get(active_turn_id or "", {})
+        critic_ctx = {
+            "summary": "",
+            "memory": [],
+            "current_time": turn_context.get("current_time", ""),
+            "suppress_summary_memory": True,
+        }
         judge_model = self._cognition_judge_model if self._cognition_judge_model else self._final_response_critic_model
         raw_critic = await self._generate_response(
             critic_prompt,
@@ -990,7 +1048,7 @@ class Orchestrator:
             return parsed_critic
 
         critic_schema = (
-            "{\"fulfilled\":true,\"confidence\":0.0,\"issues\":[\"...\"],\"fix_instructions\":[\"...\"]}"
+            "{\"fulfilled\":true,\"confidence\":0.0,\"requires_execution\":false,\"evidence_ids\":[],\"issues\":[\"...\"],\"fix_instructions\":[\"...\"]}"
         )
         repair_prompt = self._build_json_repair_prompt(critic_schema, raw_critic)
         repair_model = self._cognition_judge_model if self._cognition_judge_model else self._final_response_critic_model
@@ -1050,7 +1108,14 @@ class Orchestrator:
             code=code,
             dependencies=dependencies,
         )
-        critic_ctx = {"summary": "", "memory": [], "suppress_summary_memory": True}
+        active_turn_id = _CURRENT_TURN_ID.get()
+        turn_context = self._turn_context_packet.get(active_turn_id or "", {})
+        critic_ctx = {
+            "summary": "",
+            "memory": [],
+            "current_time": turn_context.get("current_time", ""),
+            "suppress_summary_memory": True,
+        }
         raw_critic = await self._generate_response(
             critic_prompt,
             PRIMARY_REASONING_MODE,
@@ -1107,112 +1172,12 @@ class Orchestrator:
             "fix_instructions": ["Return strict JSON with fulfilled/confidence/issues/fix_instructions."],
         }
 
-    async def _apply_final_response_critic(
-        self,
-        initial_response: str,
-        mode: str,
-        context_packet: Dict[str, Any],
-        trace_id: str,
-        turn_id: str,
-        query_state: Optional[Dict[str, Any]] = None,
-    ) -> str:
-
-        if not self._final_response_critic_enabled:
-            return initial_response
-        mode_key = mode.strip().upper() if isinstance(mode, str) else ""
-        if mode_key and mode_key in self._final_response_critic_skip_modes:
-            record_event(
-                "final_critic_skipped",
-                {
-                    "turn_id": turn_id,
-                    "trace_id": trace_id,
-                    "mode": mode,
-                    "reason": "mode_config_skip",
-                },
-            )
-            self._log_mode_event(
-                mode,
-                "final_critic_skipped",
-                {"trace_id": trace_id, "mode": mode, "reason": "mode_config_skip"},
-            )
-            return initial_response
-
-        candidate_response = initial_response
-        retry_count = 0
-        while True:
-            critique = await self._evaluate_final_response_critic(
-                candidate_response,
-                mode,
-                trace_id,
-                turn_id,
-                query_state=query_state,
-            )
-
-            confidence = float(critique.get("confidence", 0.0))
-            fulfilled = critique.get("fulfilled") is True and confidence >= self._final_response_critic_min_confidence
-            issues = critique.get("issues", [])
-            fixes = critique.get("fix_instructions", [])
-            record_event(
-                "final_critic_result",
-                {
-                    "turn_id": turn_id,
-                    "trace_id": trace_id,
-                    "mode": mode,
-                    "fulfilled": bool(fulfilled),
-                    "confidence": confidence,
-                    "issues": issues if isinstance(issues, list) else [],
-                    "fix_instructions": fixes if isinstance(fixes, list) else [],
-                    "retry_count": retry_count,
-                },
-            )
-            self._log_mode_event(
-                mode,
-                "final_critic_result",
-                {
-                    "trace_id": trace_id,
-                    "fulfilled": bool(fulfilled),
-                    "confidence": confidence,
-                    "issues": issues if isinstance(issues, list) else [],
-                    "fix_instructions": fixes if isinstance(fixes, list) else [],
-                    "retry_count": retry_count,
-                },
-            )
-            if fulfilled:
-                return candidate_response
-            if retry_count >= self._final_response_critic_max_retries:
-                return candidate_response
-            retry_count += 1
-            # Build retry text based on query_state if available, otherwise fallback to a generic instruction.
-            # But the goal is to not use the original text.
-            retry_text = (
-                f"Your previous response had issues: {', '.join(critique.get('issues', []))}.\n"
-                f"Please fix them: {', '.join(critique.get('fix_instructions', []))}.\n"
-                "Focus on the task defined in your internal state."
-            )
-            self._log_mode_event(
-                mode,
-                "final_critic_retry",
-                {
-                    "trace_id": trace_id,
-                    "retry_count": retry_count,
-                    "retry_text_preview": self._truncate(retry_text, 1200),
-                },
-            )
-            candidate_response = await self._run_mode_once(
-                mode,
-                retry_text,
-                context_packet,
-                trace_id,
-                turn_id,
-                retrieval_query=None,
-            )
-
-
     async def _process_turn(self, turn_id: str) -> None:
         trace_id: Optional[str] = None
         mode: str = PRIMARY_REASONING_MODE
         turn_ctx_token = _CURRENT_TURN_ID.set(turn_id)
         trace_ctx_token = None
+        autonomy_token = _CURRENT_AUTONOMY.set(getattr(self, "_pending_autonomy_constraints", {}).get(turn_id))
         self._clear_turn_execution_evidence(turn_id)
         try:
             text = self._pending_turns.get(turn_id, "")
@@ -1240,6 +1205,18 @@ class Orchestrator:
 
             memory_hits: List[Dict[str, Any]] = []
             context_packet = self._context_builder.build(self._history, self._summary, memory_hits)
+            context_packet["cognition_source_id"] = self._pending_cognition_sources.get(turn_id, "")
+            autonomy_settings = getattr(getattr(self, "_settings", None), "autonomy", {}) or {}
+            if (autonomy_settings.get("enabled") is True
+                    and autonomy_settings.get("context_enabled", True) is True
+                    and _CURRENT_AUTONOMY.get() is None):
+                from epistemic.context import load_belief_context
+                try:
+                    belief_context = await asyncio.wait_for(asyncio.to_thread(load_belief_context, text), timeout=3.0)
+                    if belief_context:
+                        context_packet["summary"] = str(context_packet.get("summary", "")) + "\n" + belief_context
+                except Exception as exc:
+                    record_event("belief_context_unavailable", {"turn_id": turn_id, "error": str(exc)[:200]})
             self._turn_context_packet[turn_id] = dict(context_packet)
             record_event(
                 "context_built",
@@ -1249,7 +1226,6 @@ class Orchestrator:
                     "summary": context_packet.get("summary", ""),
                     "memory_count": len(memory_hits),
                     "needs_memory": False,
-                    "embodiment_present": bool(context_packet.get("embodiment")),
                 },
             )
 
@@ -1272,6 +1248,15 @@ class Orchestrator:
 
 
             final_payload = {"text": response_text, "trace_id": trace_id, "turn_id": turn_id}
+            run = getattr(self, "_cognition_runs", {}).get(turn_id)
+            if run:
+                final_payload["completion"] = run.get("completion", {"status": run["status"]})
+                final_payload["checkpoint_id"] = run["run_id"]
+                final_payload["execution_metrics"] = {key: run.get(key, 0) for key in
+                    ("segments", "actions_used", "model_calls", "elapsed_s")}
+            autonomy = _CURRENT_AUTONOMY.get()
+            if autonomy is not None:
+                final_payload["tool_evidence"] = list(autonomy["evidence"])
             if turn_id in self._pending_turn_modes:
                 trace_for_turn = self._pending_turn_traces.get(turn_id, [])
                 if trace_for_turn:
@@ -1299,7 +1284,9 @@ class Orchestrator:
                 response_text,
                 trace_id,
                 turn_id,
-                skip_distillation=skip_distillation,
+                # Cognition already stages knowledge for review. Do not let the
+                # legacy conversation distiller promote the same claims indirectly.
+                skip_distillation=skip_distillation or run is not None,
             )
 
             self._pending_turns.pop(turn_id, None)
@@ -1336,10 +1323,17 @@ class Orchestrator:
             )
         finally:
             self._turn_context_packet.pop(turn_id, None)
+            getattr(self, '_tool_recovery_states', {}).pop(trace_id, None)
             if trace_ctx_token is not None:
                 _CURRENT_TRACE_ID.reset(trace_ctx_token)
+            _CURRENT_AUTONOMY.reset(autonomy_token)
+            getattr(self, "_pending_autonomy_constraints", {}).pop(turn_id, None)
             _CURRENT_TURN_ID.reset(turn_ctx_token)
             self._clear_turn_execution_evidence(turn_id)
+            getattr(self, "_cognition_runs", {}).pop(turn_id, None)
+            self._pending_acceptance_checks.pop(turn_id, None)
+            self._pending_cognition_resume.pop(turn_id, None)
+            self._pending_cognition_sources.pop(turn_id, None)
 
     async def _generate_response(
         self,
@@ -1352,6 +1346,11 @@ class Orchestrator:
         options_override: Optional[Dict[str, Any]] = None,
     ) -> str:
         resolved_mode = self._normalize_requested_mode(mode) or PRIMARY_REASONING_MODE
+        run = ACTIVE_RUN.get()
+        if run is not None:
+            if run["model_calls"] >= run["max_model_calls"]:
+                raise CognitionBudgetExceeded("Total cognition model-call budget exhausted")
+            run["model_calls"] += 1
         ctx = self._build_llm_context(resolved_mode, trace_id, turn_id, context_packet=context_packet)
         record_event(
             "llm_request",
@@ -1411,6 +1410,16 @@ class Orchestrator:
         model_override: Optional[str] = None,
         options_override: Optional[Dict[str, Any]] = None,
     ) -> str:
+        run = ACTIVE_RUN.get()
+        if run is not None:
+            if run["model_calls"] >= run["max_model_calls"]:
+                raise CognitionBudgetExceeded("Total cognition model-call budget exhausted")
+            run["model_calls"] += 1
+            text = ("ORIGINAL REQUEST (retain every constraint):\n" + run["original_request"] + "\n"
+                    + "CALLER ACCEPTANCE CHECKS:\n" + self._safe_json(run["checks"]) + "\n"
+                    + "RETRY FEEDBACK:\n" + self._safe_json(run.get("feedback", {})) + "\n"
+                    + "STRATEGY REVIEW (resolve outstanding concerns):\n" + self._safe_json(run.get("system3_review", {})) + "\n"
+                    + "Use existing observations. Do not repeat completed mutations. Verify external state after uncertain execution.\n\n" + text)
         ctx = self._build_llm_context("COGNITION", trace_id, turn_id)
         request_payload: Dict[str, Any] = {"text": text, "context": ctx}
         if isinstance(model_override, str) and model_override.strip():
@@ -1425,6 +1434,7 @@ class Orchestrator:
                 "mode": "COGNITION",
                 "text": text,
                 "model_override": request_payload.get("model_override", ""),
+                "request_bytes": len(self._safe_json(request_payload).encode('utf-8')),
             },
         )
         try:
@@ -1435,16 +1445,18 @@ class Orchestrator:
                 request_payload,
                 timeout=self._model_rpc_timeout_s,
             )
+            if resp.get('status') == 'ERROR':
+                raise RpcError(str(resp.get('error') or 'Model service returned an error'))
         except RpcError as e:
             record_event(
                 "llm_error",
                 {"turn_id": turn_id, "trace_id": trace_id, "mode": "COGNITION", "error": str(e)},
             )
-            return (
-                "{\"type\":\"final\",\"thought\":\"Model unavailable.\","
-                "\"text\":\"I hit a model error while running cognition. "
-                "Please try again or use a smaller model.\"}"
-            )
+            tool_error = self._recovery_state(trace_id).get('last_error_message')
+            message = f"The model service connection failed: {e}."
+            if tool_error:
+                message = f"The last tool failed: {tool_error}\n\n{message} I could not continue recovery."
+            return self._safe_json({'type': 'final', 'thought': 'Model service unavailable.', 'text': message})
         record_event(
             "llm_response",
             {"turn_id": turn_id, "trace_id": trace_id, "mode": "COGNITION", "text": resp.get("text", "")},
@@ -1513,6 +1525,11 @@ class Orchestrator:
         if not packet and isinstance(turn_id, str) and turn_id:
             packet = self._turn_context_packet.get(turn_id, {})
         resolved_mode = self._normalize_requested_mode(mode) or PRIMARY_REASONING_MODE
+        current_time = str(packet.get("current_time") or "").strip()
+        if not current_time and isinstance(turn_id, str) and turn_id:
+            current_time = str(
+                self._turn_context_packet.get(turn_id, {}).get("current_time") or ""
+            ).strip()
         ctx = {
             "mode": resolved_mode,
             "summary": packet.get("summary", ""),
@@ -1524,104 +1541,133 @@ class Orchestrator:
                 "aliases": self._system_entity.aliases,
             }
         }
+        if current_time:
+            ctx["current_time"] = current_time
+        semantic_summary = str(packet.get("semantic_summary") or "").strip()
+        if semantic_summary:
+            ctx["semantic_summary"] = semantic_summary
         if packet.get("suppress_summary_memory"):
             ctx["suppress_summary_memory"] = True
         return ctx
 
-    async def _resolve_embodiment_fallback_tool(
+    async def _refresh_cognition_time_context(
         self,
-        tool_id: str,
+        context_packet: Dict[str, Any],
         trace_id: str,
-    ) -> Optional[Dict[str, Any]]:
-        if not isinstance(tool_id, str) or not tool_id.startswith("embodiment."):
-            return None
-        if tool_id.startswith("embodiment.generated."):
-            return None
-        if tool_id in {
-            "embodiment.describe_host",
-            "embodiment.list_capabilities",
-            "embodiment.list_fallbacks",
-            "embodiment.get_state",
-        }:
-            return None
+        turn_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Read the current time once and make it available to this turn's models."""
+        current_time = ""
+        source = "sys.time"
+        error = ""
+        try:
+            response = await self._call_tool(
+                "sys.time",
+                {},
+                None,
+                trace_id,
+                [],
+            )
+            if str(response.get("status") or "").upper() == "APPROVED":
+                result = response.get("result")
+                if isinstance(result, dict):
+                    current_time = str(result.get("iso") or "").strip()
+            if not current_time:
+                error = str(response.get("error") or "sys.time returned no ISO timestamp")
+        except Exception as exc:
+            error = str(exc)
 
-        capability_resp = await self._call_tool(
-            "embodiment.list_capabilities",
-            {},
-            approval_token=None,
-            trace_id=trace_id,
-            required_artifacts=[],
+        # Keep prompts useful during a degraded tool-runtime startup while
+        # retaining the fact that the authoritative tool lookup failed.
+        if not current_time:
+            current_time = utc_now_iso()
+            source = "orchestrator_fallback"
+
+        context_packet["current_time"] = current_time
+        context_packet["current_time_source"] = source
+        if error:
+            context_packet["current_time_error"] = error
+        if isinstance(turn_id, str) and turn_id:
+            self._turn_context_packet[turn_id] = dict(context_packet)
+        record_event(
+            "cognition_time_context",
+            {
+                "turn_id": turn_id,
+                "trace_id": trace_id,
+                "current_time": current_time,
+                "source": source,
+                "error": error,
+            },
         )
-        capability_payload = capability_resp.get("result")
-        if capability_resp.get("status") != "APPROVED" or not isinstance(capability_payload, dict):
-            return None
-        capability = None
-        for item in capability_payload.get("capabilities", []):
-            if not isinstance(item, dict):
-                continue
-            tool_ids = item.get("tool_ids", [])
-            if isinstance(tool_ids, list) and tool_id in tool_ids:
-                capability = item
-                break
-        if not isinstance(capability, dict) or capability.get("status") != "configured":
-            return None
+        return context_packet
 
-        fallback_resp = await self._call_tool(
-            "embodiment.list_fallbacks",
-            {},
-            approval_token=None,
-            trace_id=trace_id,
-            required_artifacts=[],
+    async def _compute_semantic_context_summary(
+        self,
+        context_packet: Dict[str, Any],
+        user_text: str,
+        trace_id: str,
+        turn_id: Optional[str],
+    ) -> str:
+        """Compress prior conversation context into a small reasoning summary."""
+        prior_summary = str(context_packet.get("summary") or "").strip()
+        recent_turns = context_packet.get("recent_turns", [])
+        recent_text = self._safe_json(recent_turns) if isinstance(recent_turns, list) else "[]"
+        if not prior_summary and recent_text == "[]":
+            return ""
+        prompt = (
+            "Create a concise semantic summary of the prior conversation for another reasoning model.\n"
+            "Preserve the user's goals, constraints, decisions, relevant facts, and unresolved questions.\n"
+            "Do not answer the current request and do not invent information.\n"
+            "Return plain text only, preferably in 3-8 short lines.\n\n"
+            f"EXISTING SUMMARY:\n{prior_summary or 'None'}\n\n"
+            f"RECENT TURNS:\n{self._truncate(recent_text, 8000)}\n\n"
+            f"CURRENT REQUEST:\n{self._truncate(user_text, 2400)}"
         )
-        fallback_payload = fallback_resp.get("result")
-        if fallback_resp.get("status") != "APPROVED" or not isinstance(fallback_payload, dict):
-            return None
-
-        capability_id = str(capability.get("capability_id", "")).strip()
-        abstract_capability = str(capability.get("abstract_capability", "")).strip()
-        candidate = None
-        for item in fallback_payload.get("fallbacks", []):
-            if not isinstance(item, dict):
-                continue
-            item_capability_id = str(item.get("capability_id", "")).strip()
-            item_abstract = str(item.get("abstract_capability", "")).strip()
-            if capability_id and item_capability_id == capability_id:
-                candidate = item
-                break
-            if abstract_capability and item_abstract == abstract_capability:
-                candidate = item
-                break
-        if not isinstance(candidate, dict):
-            return None
-
-        tool_spec = candidate.get("tool_spec")
-        if not isinstance(tool_spec, dict):
-            return None
-        generated_tool_id = str(tool_spec.get("tool_id", "")).strip()
-        if not generated_tool_id:
-            return None
-        if self._tools.get_tool(generated_tool_id):
-            return {
-                "tool_id": generated_tool_id,
-                "capability_id": capability_id,
-                "created": False,
-                "reason": candidate.get("reason", ""),
-            }
-
-        create_result = await self._handle_create_tool(tool_spec, trace_id)
-        if create_result.get("status") != "APPROVED":
-            return {
-                "error": str(create_result.get("error") or "Failed to create embodiment fallback tool"),
-                "capability_id": capability_id,
-                "tool_id": generated_tool_id,
-                "reason": candidate.get("reason", ""),
-            }
-        return {
-            "tool_id": generated_tool_id,
-            "capability_id": capability_id,
-            "created": True,
-            "reason": candidate.get("reason", ""),
-        }
+        current_time = str(context_packet.get("current_time") or "").strip()
+        run = ACTIVE_RUN.get()
+        if run is not None:
+            if run["model_calls"] >= run["max_model_calls"]:
+                raise CognitionBudgetExceeded("Total cognition model-call budget exhausted")
+            run["model_calls"] += 1
+        try:
+            response = await send_request(
+                self._model_host,
+                self._model_port,
+                "model.Generate",
+                {
+                    "text": prompt,
+                    "context": {
+                        "mode": "GENERAL",
+                        "summary": "",
+                        "memory": [],
+                        "current_time": current_time,
+                        "trace_id": trace_id,
+                        "turn_id": turn_id,
+                        "require_model_output": True,
+                    },
+                },
+                timeout=self._model_rpc_timeout_s,
+            )
+            if response.get("status", "OK") != "OK":
+                raise RuntimeError("Semantic summary generation did not succeed")
+            summary = str(response.get("text") or "").strip()
+            if summary:
+                summary = self._truncate(summary, 2400)
+                record_event(
+                    "cognition_semantic_summary",
+                    {
+                        "turn_id": turn_id,
+                        "trace_id": trace_id,
+                        "summary": summary,
+                    },
+                )
+                return summary
+        except Exception as exc:
+            record_event(
+                "cognition_semantic_summary_error",
+                {"turn_id": turn_id, "trace_id": trace_id, "error": str(exc)},
+            )
+        return prior_summary
 
     async def _execute_tool_action(
         self,
@@ -1629,7 +1675,6 @@ class Orchestrator:
         args: Dict[str, Any],
         trace_id: str,
         thought: str = "",
-        allow_embodiment_fallback: bool = False,
     ) -> Dict[str, Any]:
         tool_def = self._tools.get_tool(tool_id)
         action_record = {"tool_id": tool_id, "args": args}
@@ -1644,52 +1689,11 @@ class Orchestrator:
                 "observation": {"status": "ERROR", "error": "Unknown tool"},
             }
 
-        requested_tool_id = tool_id
-        if allow_embodiment_fallback:
-            fallback_resolution = await self._resolve_embodiment_fallback_tool(tool_id, trace_id)
-            if isinstance(fallback_resolution, dict):
-                fallback_error = str(fallback_resolution.get("error", "")).strip()
-                if fallback_error:
-                    action_record["auto_fallback"] = {
-                        "tool_id": fallback_resolution.get("tool_id"),
-                        "capability_id": fallback_resolution.get("capability_id"),
-                    }
-                    return {
-                        "thought": thought,
-                        "action": action_record,
-                        "observation": {"status": "ERROR", "error": fallback_error},
-                    }
-                resolved_tool_id = str(fallback_resolution.get("tool_id", "")).strip()
-                if resolved_tool_id:
-                    tool_id = resolved_tool_id
-                    tool_def = self._tools.get_tool(tool_id)
-                    action_record = {
-                        "tool_id": tool_id,
-                        "args": args,
-                        "requested_tool_id": requested_tool_id,
-                        "auto_fallback": {
-                            "capability_id": fallback_resolution.get("capability_id"),
-                            "created": bool(fallback_resolution.get("created")),
-                        },
-                    }
-                    record_event(
-                        "embodiment_fallback_resolved",
-                        {
-                            "trace_id": trace_id,
-                            "requested_tool_id": requested_tool_id,
-                            "tool_id": tool_id,
-                            "capability_id": fallback_resolution.get("capability_id"),
-                            "created": bool(fallback_resolution.get("created")),
-                        },
-                    )
-                    if not tool_def:
-                        return {
-                            "thought": thought,
-                            "action": action_record,
-                            "observation": {"status": "ERROR", "error": "Generated fallback tool was not registered"},
-                        }
-
         decision = self._policy.evaluate_tool(tool_def, args)
+        autonomy = _CURRENT_AUTONOMY.get()
+        if autonomy is not None and (autonomy["remaining"] <= 0 or
+                (autonomy["permission_policy"] != "approve" and decision.status != "ALLOW")):
+            return {"action": action_record, "observation": {"status": "DENIED", "error": "Autonomy execution limit or permission policy"}}
         approval_token = None
         if decision.status == "CONFIRM":
             if self._auto_approve_all:
@@ -1724,6 +1728,10 @@ class Orchestrator:
             "result": resp.get("result"),
             "error": resp.get("error"),
         }
+        if resp.get("evidence_id"):
+            observation["evidence_id"] = resp["evidence_id"]
+        if resp.get('error_details'):
+            observation['error_details'] = resp['error_details']
         if resp.get("artifacts"):
             observation["artifacts"] = resp.get("artifacts")
         if resp.get("logs_ref"):
@@ -1736,7 +1744,13 @@ class Orchestrator:
         trace_id: str,
     ) -> Dict[str, Any]:
         action_type = str(action.get("action_type") or "tool").strip().lower()
+        if action_type == 'retrieve_tools':
+            return await self._retrieve_tools_action(action, trace_id)
         if action_type == "generate_tools_from_spec":
+            gate = await self._generation_recovery_gate(action, trace_id)
+            if gate is not None:
+                return gate
+            self._checkpoint_cognition()  # Persist the generation attempt before creating tools.
             spec = action.get("spec", {})
             label = str(action.get("label") or "").strip()
             action_record: Dict[str, Any] = {"action_type": "generate_tools_from_spec", "spec": spec}
@@ -1782,7 +1796,12 @@ class Orchestrator:
         if not isinstance(args, dict):
             args = {}
         thought = str(action.get("thought") or "").strip()
+        preflight = self._preflight_tool_action(action, trace_id)
+        if preflight is not None:
+            self._remember_tool_outcome(action, preflight['observation'], trace_id)
+            return preflight
         result = await self._execute_tool_action(tool_id, args, trace_id, thought=thought)
+        self._remember_tool_outcome(action, result.get('observation', {}), trace_id)
         result["new_tools"] = []
         return result
 
@@ -1880,6 +1899,9 @@ class Orchestrator:
                         "mode": "GENERAL",
                         "summary": "",
                         "memory": [],
+                        "current_time": self._turn_context_packet.get(turn_id or "", {}).get(
+                            "current_time", ""
+                        ),
                         "trace_id": trace_id,
                         "turn_id": turn_id,
                     },
@@ -2006,28 +2028,40 @@ class Orchestrator:
                 description.strip() if isinstance(description, str) else "",
                 f"capabilities={capabilities}",
                 f"input_schema={self._safe_json(input_schema)}",
+                contract_text(tool),
             ]
             if part
         )
 
-    async def _embed_text(self, text: str) -> List[float]:
-        cached = self._embed_cache.get(text)
+    async def _embed_text(self, text: str, task: str = "search_query") -> List[float]:
+        model = self._tool_embedding_model
+        cache_key = f"{model}\0{task}\0{text}"
+        cached = self._embed_cache.get(cache_key)
         if cached is not None:
             return cached
         resp = await send_request(
             self._model_host,
             self._model_port,
             "model.EmbedText",
-            {"text": text},
+            {"text": f"{task}: {text}" if "nomic-embed-text" in model.lower() else text},
         )
+        if resp.get("status", "OK") != "OK" or resp.get("model") == "sha256-text-v1":
+            raise ValueError("Semantic tool embedding unavailable; refusing placeholder vectors")
         embedding = resp.get("embedding", [])
+        if (
+            not isinstance(embedding, list)
+            or not embedding
+            or not all(isinstance(x, (int, float)) and math.isfinite(x) for x in embedding)
+            or not any(embedding)
+        ):
+            raise ValueError("Invalid semantic tool embedding")
         if self._embed_cache_limit > 0:
             if len(self._embed_cache) >= self._embed_cache_limit:
                 try:
                     self._embed_cache.pop(next(iter(self._embed_cache)))
                 except StopIteration:
                     pass
-            self._embed_cache[text] = embedding
+            self._embed_cache[cache_key] = embedding
         return embedding
 
     async def _ensure_tool_index(self) -> None:
@@ -2042,7 +2076,7 @@ class Orchestrator:
             cached = self._tool_index.get(tool_id)
             if cached and cached.get("desc") == desc:
                 continue
-            embedding = await self._embed_text(desc)
+            embedding = await self._embed_text(desc, task="search_document")
             self._tool_index[tool_id] = {
                 "tool": tool,
                 "desc": desc,
@@ -2056,19 +2090,43 @@ class Orchestrator:
         all_tools = self._tools.list_active()
         if not self._retrieve_relevant_tools_enabled:
             return all_tools
-        if top_k <= 0 or top_k >= len(all_tools):
-            return all_tools
+        limit = max(0, int(top_k))
+        threshold = self._tool_retrieval_min_similarity
+        selected = []
+        candidates = []
+        status = "selected"
+        error = None
         try:
-            await self._ensure_tool_index()
-            query_embedding = await self._embed_text(query)
-            scored = []
-            for entry in self._tool_index.values():
-                score = self._cosine(query_embedding, entry.get("embedding", []))
-                scored.append((score, entry.get("tool")))
-            scored.sort(key=lambda x: x[0], reverse=True)
-            return [tool for _, tool in scored[:top_k] if tool is not None]
-        except Exception:
-            return all_tools
+            if limit and all_tools:
+                await self._ensure_tool_index()
+                query_embedding = await self._embed_text(query)
+                scored = []
+                for entry in self._tool_index.values():
+                    score = self._cosine(query_embedding, entry.get("embedding", []))
+                    tool = entry.get("tool")
+                    if tool is not None and math.isfinite(score):
+                        scored.append((score, tool))
+                scored.sort(key=lambda x: x[0], reverse=True)
+                candidates = [
+                    {"tool_id": tool.get("tool_id"), "score": round(score, 4)}
+                    for score, tool in scored[:limit]
+                ]
+                selected = [tool for score, tool in scored[:limit] if score >= threshold]
+        except Exception as exc:
+            # Preserve access when embeddings fail, but never exceed the cap.
+            selected = all_tools[:limit]
+            status = "fallback"
+            error = str(exc)
+        record_event("tool_retrieval", {
+            "status": status,
+            "max_tools": limit,
+            "min_similarity": threshold,
+            "candidate_count": len(all_tools),
+            "top_candidates": candidates,
+            "selected_tool_ids": [tool.get("tool_id") for tool in selected],
+            "error": error,
+        })
+        return selected
 
     async def _select_relevant_tools(
         self,
@@ -2336,7 +2394,8 @@ class Orchestrator:
                         continue
                     seen.add(tool_id)
                 merged.append(tool)
-        return merged
+        active = self._tools.list_active()
+        return expand_prerequisites(merged, active) if isinstance(active, list) else merged
 
     def _format_tools_for_agent(self, tools: Optional[List[Dict[str, Any]]] = None) -> str:
         if tools is None:
@@ -2344,10 +2403,27 @@ class Orchestrator:
         if not tools:
             return "None"
         lines = []
+        if any(tool.get('tool_id') in {'computer.screenshot', 'image.analyse', 'vision.observe', 'video.analyse'} for tool in tools):
+            lines.append(
+                'VISUAL TOOL RULES: For the current desktop or a follow-up about a visible window/video, '
+                'call computer.screenshot first. In the NEXT action cycle, call image.analyse with the '
+                'exact image_ref returned by successful capture. Do not invent paths or placeholders. '
+                'vision.observe reads CAMERA frames, not desktop screenshots; video.analyse requires '
+                'a video file/reference, not a visible video player. Do not focus a window just to read '
+                'the already visible screen. Past conversation/memory is not evidence of current screen '
+                'contents: obtain a fresh observation before claiming what is visible. '
+                'For a visual click target whose coordinates were not supplied, first take a full '
+                'computer.screenshot with prepare_input=true (approve Wayland control before capture). '
+                'Then call ui.predict_coords with that screenshot and target description; use its returned pixel x/y in '
+                'computer.click. image.analyse is descriptive and must not be used for click coordinates. '
+                'If capture fails, report the error; do not substitute camera observation or repeatedly '
+                'retry the same unavailable source.'
+            )
         for tool in tools:
             tool_id = tool.get("tool_id")
             name = tool.get("name", "")
             description = tool.get("description") or ""
+            description = f'{description} {contract_text(tool)}'.strip()
             input_schema = tool.get("input_schema", {})
             schema_text = self._safe_json(input_schema)
             label = f"{tool_id}: {name}".strip(": ")
@@ -2359,10 +2435,22 @@ class Orchestrator:
 
     def _format_cognition_special_actions(self) -> str:
         return (
+            '- retrieve_tools: {"action_type":"retrieve_tools","query":"required capability",'
+            '"intent":{"source":"desktop"},"label":"Find an alternative"}. '
+            'Always available, even if AVAILABLE TOOLS is empty. Searches the full permitted registry '
+            '(maximum two searches per turn). Resolve references using recent conversation; never treat '
+            'old memory as a current observation. Before tool calls, include intent with the operation '
+            'and source when known, and compare it with the tool description/source. '
+            'Handle error_details: obtain MISSING_INPUT; resolve MISSING_DEPENDENCY or find a supported '
+            'alternative; respect PERMISSION_DENIED; retrieve for SOURCE_MISMATCH/UNSUPPORTED_PLATFORM; '
+            'retry TEMPORARY_FAILURE at most once; repair INVALID_MODEL_OUTPUT within the action budget. '
+            'Unknown errors are not evidence that a new tool is needed.\n'
             "- generate_tools_from_spec: "
             "{\"action_type\":\"generate_tools_from_spec\",\"spec\":{\"request\":\"...\",\"namespace_prefix\":\"...\","
-            "\"max_tools\":2},\"label\":\"...\"} "
-            "Use this only when the listed tools clearly cannot satisfy a stable capability gap and a reusable tool would help."
+            "\"max_tools\":2},\"generation_reason\":\"why alternatives do not fit and implementation is feasible\",\"label\":\"...\"} "
+            'Review a retrieve_tools result first. Only generate for an implementation gap, using '
+            'available dependencies and permissions. Existing validation and approval still apply. '
+            'Maximum one generation attempt per turn. Do not generate around denied permissions.'
         )
 
     def _format_asi_input_specs(self, inputs_needed: Any) -> str:
@@ -2511,8 +2599,9 @@ class Orchestrator:
         delta_fields = self._cognition_delta_schema_fields()
         action_schema = (
             "["
-            "{\"tool_id\":\"...\",\"args\":{},\"label\":\"...\"},"
-            "{\"action_type\":\"generate_tools_from_spec\",\"spec\":{\"request\":\"...\",\"namespace_prefix\":\"...\",\"max_tools\":2},\"label\":\"...\"}"
+            "{\"tool_id\":\"...\",\"args\":{},\"intent\":{\"operation\":\"...\",\"source\":\"...\"},\"label\":\"...\"},"
+            '{"action_type":"retrieve_tools","query":"...","label":"..."},'
+            "{\"action_type\":\"generate_tools_from_spec\",\"spec\":{\"request\":\"...\",\"namespace_prefix\":\"...\",\"max_tools\":2},\"generation_reason\":\"implementation gap and feasibility\",\"label\":\"...\"}"
             "]"
         )
         final_fields = ["\"type\":\"final\"", "\"thought\":\"...\"", "\"text\":\"...\""] + delta_fields
@@ -2538,6 +2627,21 @@ class Orchestrator:
             "act": self._compose_cognition_schema(act_fields),
             "step": self._compose_cognition_schema(step_fields),
         }
+
+    def _build_cognition_system0_schema(self) -> str:
+        """Schema for the mandatory first-pass decision.
+
+        System0 is deliberately limited to answering or escalating. It cannot
+        execute tools; an escalation continues through the normal cognition
+        initialization and routing pipeline.
+        """
+        final_schema = self._compose_cognition_schema(
+            ["\"type\":\"final\"", "\"thought\":\"...\"", "\"text\":\"...\""]
+        )
+        escalate_schema = self._compose_cognition_schema(
+            ["\"type\":\"escalate\"", "\"thought\":\"...\"", "\"reason\":\"...\""]
+        )
+        return f"{final_schema}\n{escalate_schema}"
 
     def _build_cognition_execution_schema_text(
         self,
@@ -2662,30 +2766,6 @@ class Orchestrator:
             "todo": [],
         }
 
-    def _is_trivial_cognition_request(self, text: str, tools: Optional[List[Dict[str, Any]]] = None) -> bool:
-        normalized = " ".join(str(text or "").strip().lower().split())
-        if not normalized:
-            return False
-        if tools:
-            return False
-        if len(normalized) >= self._cognition_distill_trivial_max_chars:
-            return False
-        words = normalized.rstrip("?.!").split()
-        if len(words) <= 2:
-            return True
-        trivial_prefixes = (
-            "hi",
-            "hello",
-            "hey",
-            "thanks",
-            "thank you",
-            "ok",
-            "okay",
-            "yes",
-            "no",
-        )
-        return normalized.rstrip("?.!") in trivial_prefixes
-
     def _normalize_cognition_query_state_delta(self, value: Any) -> Dict[str, Any]:
         if not self._cognition_query_state_enabled:
             return {}
@@ -2784,18 +2864,31 @@ class Orchestrator:
             return []
         normalized: List[Dict[str, Any]] = []
         max_items = max(0, limit)
+        if not max_items:
+            return normalized
         for item in values:
             if not isinstance(item, dict):
                 continue
             label = str(item.get("label") or "").strip()
             action_type = str(item.get("action_type") or item.get("type") or "").strip().lower()
             tool_id = str(item.get("tool_id") or "").strip()
+            intent = item.get('intent') if isinstance(item.get('intent'), dict) else {}
+            if action_type == 'retrieve_tools' or tool_id == 'retrieve_tools':
+                normalized.append({'action_type': 'retrieve_tools', 'query': str(item.get('query') or ''),
+                                   'intent': intent, 'label': label})
+                if len(normalized) >= max_items:
+                    break
+                continue
             is_tool_generation_action = action_type == "generate_tools_from_spec" or tool_id == "generate_tools_from_spec"
             if is_tool_generation_action:
                 spec = item.get("spec", item.get("tool_generation_spec", item.get("args", {})))
                 if not isinstance(spec, dict):
                     continue
                 normalized.append({"action_type": "generate_tools_from_spec", "spec": spec, "label": label})
+                if item.get('generation_reason'):
+                    normalized[-1]['generation_reason'] = str(item['generation_reason'])
+                if intent:
+                    normalized[-1]['intent'] = intent
                 if len(normalized) >= max_items:
                     break
                 continue
@@ -2805,6 +2898,8 @@ class Orchestrator:
             if not isinstance(args, dict):
                 args = {}
             normalized.append({"action_type": "tool", "tool_id": tool_id, "args": args, "label": label})
+            if intent:
+                normalized[-1]['intent'] = intent
             if len(normalized) >= max_items:
                 break
         return normalized
@@ -2983,10 +3078,12 @@ class Orchestrator:
         return current, changed
 
     def _load_cognition_skills(self) -> List[Dict[str, Any]]:
-        return self._load_cognition_catalog(self._cognition_skills_path, self._normalize_cognition_skill)
+        return (self._load_cognition_catalog(self._cognition_skills_path, self._normalize_cognition_skill)
+                + self._reviewed_learning_items("reusable_skills", self._normalize_cognition_skill))
 
     def _load_cognition_patterns(self) -> List[Dict[str, Any]]:
-        return self._load_cognition_catalog(self._cognition_patterns_path, self._normalize_cognition_pattern)
+        return (self._load_cognition_catalog(self._cognition_patterns_path, self._normalize_cognition_pattern)
+                + self._reviewed_learning_items("patterns", self._normalize_cognition_pattern))
 
     def _find_cognition_pattern(
         self,
@@ -3016,13 +3113,14 @@ class Orchestrator:
         return source_patterns
 
     def _load_cognition_lessons(self) -> List[Dict[str, Any]]:
-        return self._load_cognition_catalog(self._cognition_lessons_path, self._normalize_cognition_lesson)
+        return (self._load_cognition_catalog(self._cognition_lessons_path, self._normalize_cognition_lesson)
+                + self._reviewed_learning_items("failure_lessons", self._normalize_cognition_lesson))
 
     def _load_cognition_safety_rules(self) -> List[Dict[str, Any]]:
-        return self._load_cognition_catalog(
+        return (self._load_cognition_catalog(
             self._cognition_safety_rules_path,
             self._normalize_cognition_safety_rule,
-        )
+        ) + self._reviewed_learning_items("safety_rules", self._normalize_cognition_safety_rule))
 
     def _format_cognition_memory_hits(self, memory_hits: List[Dict[str, Any]], limit: int = 6) -> str:
         if not memory_hits:
@@ -3232,6 +3330,8 @@ class Orchestrator:
             label = ", ".join(tool_ids)
             name_hint = "; names=" + ", ".join(names[:8]) if names else ""
             lines.append(f"- {category_id}: {len(tool_ids)} tools; tool_ids=[{label}]{name_hint}")
+            for tool in tools:
+                lines.append(f"  {tool.get('tool_id')}: {str(tool.get('description') or '')[:400]} {contract_text(tool)}")
         return "\n".join(lines)
 
     def _build_cognition_pattern_router_prompt(
@@ -3260,7 +3360,7 @@ class Orchestrator:
             return (
                 "PATTERN ROUTER\n"
                 "JSON: {\"type\":\"pattern_route\",\"decision\":\"use\",\"pattern_id\":\"...\",\"reason\":\"...\"} OR {\"type\":\"pattern_route\",\"decision\":\"route\",\"reason\":\"...\"}\n"
-                f"STATE: {query_state} {state_of_mind}\n"
+                f"STATE: {self._safe_json({'query_state': query_state, 'state_of_mind': state_of_mind})}\n"
                 f"SKILLS: {self._format_cognition_catalog_brief(skills, 'skill')}\n"
                 f"PATTERNS: {self._format_cognition_callable_patterns_brief(patterns)}\n"
             )
@@ -3278,7 +3378,7 @@ class Orchestrator:
             "- Choose only from listed callable patterns.\n"
             "- pattern_id may be returned either as the bare id or the call form.\n"
             "- Do not add extra keys.\n\n"
-            f"{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2400, state_limit=2000)}"
+            f"STATE:\n{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2400, state_limit=2000)}\n\n"
             "REUSABLE SKILLS:\n"
             f"{self._format_cognition_catalog_brief(skills, 'skill')}\n\n"
             "PATTERNS:\n"
@@ -3294,7 +3394,9 @@ class Orchestrator:
         state_or_memory_hits: Any,
         memory_or_tools: Optional[List[Dict[str, Any]]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        semantic_summary: str = "",
     ) -> str:
+        user_text = user_or_query_state if isinstance(user_or_query_state, str) else ""
         if tools is None:
             query_state = user_or_query_state if isinstance(user_or_query_state, dict) else {}
             state_of_mind = query_or_state_of_mind if isinstance(query_or_state_of_mind, dict) else {}
@@ -3305,6 +3407,7 @@ class Orchestrator:
             state_of_mind = state_or_memory_hits if isinstance(state_or_memory_hits, dict) else {}
             memory_hits = memory_or_tools if isinstance(memory_or_tools, list) else []
             active_tools = tools
+        user_text = user_text or str(query_state.get("query_rewrite") or query_state.get("intent") or "")
         modes_text = "system1|system2|system3" if self._cognition_system3_available() else "system1|system2"
         system3_rules = (
             "Choose system3 when the task would benefit from multiple competing strategies,\n"
@@ -3326,23 +3429,32 @@ class Orchestrator:
                 "AVAILABLE TOOLS:\n"
                 f"{self._format_tools_for_agent(active_tools)}\n\n"
             )
+        semantic_summary_block = (
+            "CONVERSATION SEMANTIC SUMMARY:\n"
+            f"{self._truncate(semantic_summary, 2400)}\n\n"
+            if semantic_summary
+            else ""
+        )
 
         if self._cognition_mode == "small":
             return (
                 "ROUTER\n"
+                f"USER REQUEST:\n{self._truncate(user_text, 2400)}\n"
                 f"JSON: {{\\\"type\\\":\\\"route\\\",\\\"thinking_mode\\\":\\\"{modes_text}\\\",\\\"reason\\\":\\\"...\\\",\\\"generate_tools_first\\\":false}}\n"
-                f"USER/STATE: {query_state} {state_of_mind}\n"
+                f"USER/STATE: {self._safe_json({'query_state': query_state, 'state_of_mind': state_of_mind})}\n"
+                f"SEMANTIC SUMMARY: {self._truncate(semantic_summary, 2400) if semantic_summary else 'None'}\n"
                 f"MEMORY: {self._format_cognition_memory_hits(memory_hits)}\n"
-                f"{tools_block}"
+                f"{tools_block if tools_block else ''}"
             )
 
         return (
             "COGNITION THINKING ROUTER\n\n"
             "Choose which thinking regime should handle the request.\n\n"
+            f"USER REQUEST:\n{self._truncate(user_text, 2400)}\n\n"
             "Respond with STRICT JSON only using one of:\n"
             f"{{\"type\":\"route\",\"thinking_mode\":\"{modes_text}\",\"reason\":\"...\",\"generate_tools_first\":false}}\n"
             f"{{\"type\":\"route\",\"thinking_mode\":\"{modes_text}\",\"reason\":\"...\",\"generate_tools_first\":true,"
-            "\"tool_generation_spec\":{\"request\":\"...\",\"namespace_prefix\":\"...\",\"max_tools\":2}}}\n\n"
+            "\"tool_generation_spec\":{\"request\":\"...\",\"namespace_prefix\":\"...\",\"max_tools\":2}}\n\n"
             "Choose system1 when the task can be handled through an action-oriented execution loop,\n"
             "using iterative tool calls and observations without needing deeper reflective state updates.\n"
             f"{system2_rules}"
@@ -3352,10 +3464,11 @@ class Orchestrator:
             "When generate_tools_first is true, thinking_mode must name the regime that should continue after generation completes.\n"
             "tool_generation_spec must stay minimal, reusable, and limited to the fewest tools needed.\n"
             "Leave generate_tools_first false when existing tools or normal reasoning loops are sufficient.\n\n"
-            f"{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2500, state_limit=2000)}"
+            f"STATE:\n{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2500, state_limit=2000)}\n\n"
+            f"{semantic_summary_block}"
             "RELEVANT MEMORY:\n"
             f"{self._format_cognition_memory_hits(memory_hits)}\n\n"
-            f"{tools_block}"
+            f"{tools_block if tools_block else ''}"
             "Focus only on whether the task needs the faster execution loop, the more reflective loop,\n"
             "or a small capability bootstrap before that loop begins.\n"
         )
@@ -3369,6 +3482,7 @@ class Orchestrator:
         tools: Optional[List[Dict[str, Any]]] = None,
         cycle_index: int = 1,
         strategy_brief: str = "",
+        user_text: str = "",
     ) -> str:
         schemas = self._build_cognition_system_schemas()
         allow_clarify = self._cognition_system1_clarify_enabled
@@ -3379,7 +3493,11 @@ class Orchestrator:
             else "Either answer directly or propose a small action set for the acting section.\n\n"
         )
         clarify_rule = "" if allow_clarify else "- Do not return clarify; proceed with final or act using the available context.\n"
-        strategy_block = f"COUNCIL STRATEGY:\n{strategy_brief}\n\n" if strategy_brief else ""
+        strategy_block = (
+            f"COUNCIL STRATEGY:\n{strategy_brief}\n\n"
+            if strategy_brief
+            else ""
+        )
         special_actions_block = self._format_cognition_special_actions()
         rules_block = (
             "- state deltas must use only existing query/state_of_mind keys.\n\n"
@@ -3398,9 +3516,12 @@ class Orchestrator:
                 "SYSTEM1\n"
                 f"JSON: {schemas['final']} OR {schemas['act']}\n"
                 f"CYCLE: {cycle_index}\n"
-                f"STATE: {query_state} {state_of_mind}\n"
+                f"RECOVERY ACTIONS: {special_actions_block}\n"
+                "RULES: Answer understandable requests directly; treat greetings, thanks, confirmations, and simple conversation as complete. Clarify only when a specific missing detail blocks a correct or safe answer. Never ask the user to explain an already-clear intent. A final response must answer now; when a tool is needed, return act instead of promising to use it.\n"
+                f"USER REQUEST: {self._truncate(user_text or query_state.get('query_rewrite', ''), 2400)}\n"
+                f"STATE: {self._safe_json({'query_state': query_state, 'state_of_mind': state_of_mind})}\n"
                 f"OBSERVATIONS: {self._format_agent_observations(observations)}\n"
-                f"{tools_block}"
+                f"{tools_block if tools_block else ''}"
             )
 
         return (
@@ -3416,55 +3537,82 @@ class Orchestrator:
             "- If actions are used, keep them minimal and concrete.\n"
             "- Use listed tools for normal execution.\n"
             "- Use generate_tools_from_spec only when the current tool set clearly lacks a stable capability and a reusable tool is justified.\n"
+            "- If the literal user request is understandable and answerable, return final instead of asking about intent.\n"
+            "- Treat greetings, thanks, confirmations, and simple conversational messages as complete requests.\n"
+            "- Ask clarify only when a specific missing detail blocks a correct or safe answer/action.\n"
+            "- Never ask the user to explain an intent that is already clear from the literal request.\n"
             f"{clarify_rule}"
             "- Do not fabricate results.\n"
+            "- A final response must answer the request now. If a tool is needed, return act; never merely say that you will call or search with a tool.\n"
             f"{rules_block}"
             f"CYCLE INDEX: {cycle_index}\n\n"
-            f"{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2600, state_limit=2200)}"
+            "USER REQUEST:\n"
+            f"{self._truncate(user_text or query_state.get('query_rewrite', ''), 2400)}\n\n"
+            f"STATE:\n{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2600, state_limit=2200)}\n\n"
             f"{strategy_block}"
             "OBSERVATIONS:\n"
             f"{self._format_agent_observations(observations)}\n\n"
-            f"{tools_block}"
+            f"{tools_block if tools_block else ''}"
             "SPECIAL ORCHESTRATION ACTIONS:\n"
             f"{special_actions_block}\n"
         )
 
     def _build_cognition_system0_prompt(
         self,
-        query_state: Dict[str, Any],
-        state_of_mind: Dict[str, Any],
-        observations: List[Dict[str, Any]],
-        cycle_index: int = 1,
+        user_text: str,
+        context_packet: Optional[Dict[str, Any]] = None,
     ) -> str:
-        schemas = self._build_cognition_system_schemas()
-        rules_block = (
-            "- state deltas must use only existing query/state_of_mind keys.\n\n"
-            if self._cognition_query_state_enabled or self._cognition_state_of_mind_enabled
-            else "\n"
+        system0_schema = self._build_cognition_system0_schema()
+        packet = context_packet or {}
+        context_summary = str(
+            packet.get("semantic_summary") or packet.get("summary") or ""
+        ).strip() or "None"
+        memory_hits = packet.get("memory", [])
+        memory_block = self._format_cognition_memory_hits(memory_hits) if isinstance(memory_hits, list) else "None"
+        system_identity = {
+            "mem_id": self._system_entity.mem_id,
+            "name": self._system_entity.name,
+            "aliases": self._system_entity.aliases,
+            "properties": self._system_entity.properties,
+            "pins": self._system_entity.pins,
+        }
+        system_context = (
+            "SYSTEM IDENTITY:\n"
+            f"{self._safe_json(system_identity)}\n\n"
+            "CURRENT UTC DATETIME:\n"
+            f"{(context_packet or {}).get('current_time') or utc_now_iso()}\n\n"
+            "CONTEXT SUMMARY:\n"
+            f"{context_summary}\n\n"
+            "RELEVANT MEMORY:\n"
+            f"{memory_block}\n"
         )
 
         if self._cognition_mode == "small":
             return (
                 "SYSTEM0\n"
-                f"JSON: {schemas['final']}\n"
-                f"STATE: {query_state} {state_of_mind}\n"
-                f"OBSERVATIONS: {self._format_agent_observations(observations)}\n"
+                f"JSON: {system0_schema}\n"
+                f"{system_context}"
+                "RULES: Return final only for a simple, safe, fully grounded request. "
+                "Return escalate for any request needing tools, current information, files, external services, "
+                "actions, multiple steps, deeper reasoning, or clarification.\n"
+                f"USER REQUEST: {user_text}\n"
             )
 
         return (
             "COGNITION SYSTEM0\n\n"
-            "Handle a trivial request with the fastest safe path and return the answer directly.\n\n"
-            "Respond with STRICT JSON only using:\n"
-            f"{schemas['final']}\n\n"
+            "Perform the first-pass triage for every request. Answer directly only when the request is simple, safe, and fully grounded in the available information. Otherwise escalate it to the full cognition pipeline.\n\n"
+            "Respond with STRICT JSON only using one of:\n"
+            f"{system0_schema}\n\n"
             "Rules:\n"
-            "- Prefer a direct answer when grounded by the request or current observations.\n"
-            "- Do not ask clarifying questions or propose actions.\n"
+            "- Return final when you can answer without initialization, routing, or tools.\n"
+            "- Return escalate when the request is ambiguous, multi-step, requires tools, needs memory, or needs deeper reasoning.\n"
+            "- Escalate requests needing current information, files, external services, calculations, actions, or any tool.\n"
+            "- Escalate when the meaning, requirements, or expected result is ambiguous.\n"
+            "- Use the system identity and current UTC datetime when they are sufficient to answer safely.\n"
             "- Do not fabricate results.\n"
-            f"{rules_block}"
-            f"CYCLE INDEX: {cycle_index}\n\n"
-            f"{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=1600, state_limit=1200)}"
-            "OBSERVATIONS:\n"
-            f"{self._format_agent_observations(observations)}\n\n"
+            f"{system_context}"
+            "USER REQUEST:\n"
+            f"{user_text}\n"
         )
 
 
@@ -3478,8 +3626,10 @@ class Orchestrator:
         tools: Optional[List[Dict[str, Any]]] = None,
         cycle_index: int = 1,
         strategy_brief: str = "",
+        user_text: str = "",
     ) -> str:
         if isinstance(user_or_query_state, str):
+            user_text = user_text or user_or_query_state
             query_state = query_or_state_of_mind if isinstance(query_or_state_of_mind, dict) else {}
             state_of_mind = state_or_observations if isinstance(state_or_observations, dict) else {}
             observations = observations_or_trace if isinstance(observations_or_trace, list) else []
@@ -3498,7 +3648,11 @@ class Orchestrator:
         allow_clarify = self._cognition_system2_clarify_enabled
         clarify_schema = f"{schemas['clarify']}\n" if allow_clarify else ""
         clarify_rule = "" if allow_clarify else "- Do not return clarify; continue with step or final using the available context.\n"
-        strategy_block = f"COUNCIL STRATEGY:\n{strategy_brief}\n\n" if strategy_brief else ""
+        strategy_block = (
+            f"COUNCIL STRATEGY:\n{strategy_brief}\n\n"
+            if strategy_brief
+            else ""
+        )
         special_actions_block = self._format_cognition_special_actions()
         intro_block = (
             "Run one deliberate cognition cycle: reflect, update state, update todo, and optionally plan actions.\n\n"
@@ -3518,11 +3672,14 @@ class Orchestrator:
             return (
                 "SYSTEM2\n"
                 f"JSON: {schemas['step']} OR {schemas['final']}\n"
+                f"RECOVERY ACTIONS: {special_actions_block}\n"
                 f"CYCLE: {cycle_index}\n"
-                f"STATE: {query_state} {state_of_mind}\n"
+                "RULES: A final response must answer now. When a tool is needed, return step with actions instead of promising to use it.\n"
+                f"USER REQUEST: {self._truncate(user_text or query_state.get('query_rewrite', ''), 2400)}\n"
+                f"STATE: {self._safe_json({'query_state': query_state, 'state_of_mind': state_of_mind})}\n"
                 f"OBSERVATIONS: {self._format_agent_observations(observations)}\n"
                 f"TRACE: {thinking_trace_block}\n"
-                f"{tools_block}"
+                f"{tools_block if tools_block else ''}"
             )
 
         return (
@@ -3538,16 +3695,19 @@ class Orchestrator:
             "- Use actions only when a tool can reduce uncertainty or complete the task.\n"
             "- Use listed tools for normal execution.\n"
             "- Use generate_tools_from_spec only when the current tool set clearly lacks a stable capability and a reusable tool is justified.\n"
+            "- A final response must answer the request now. If a tool is needed, return step with actions; never merely say that you will call or search with a tool.\n"
             f"{clarify_rule}"
             f"{rules_block}"
             f"CYCLE INDEX: {cycle_index}\n\n"
-            f"{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2600, state_limit=2200)}"
+            "USER REQUEST:\n"
+            f"{self._truncate(user_text or query_state.get('query_rewrite', ''), 2400)}\n\n"
+            f"STATE:\n{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2600, state_limit=2200)}\n\n"
             f"{strategy_block}"
             "OBSERVATIONS:\n"
             f"{self._format_agent_observations(observations)}\n\n"
             "THINKING TRACE:\n"
             f"{thinking_trace_block}\n\n"
-            f"{tools_block}"
+            f"{tools_block if tools_block else ''}"
             "SPECIAL ORCHESTRATION ACTIONS:\n"
             f"{special_actions_block}\n"
         )
@@ -3575,7 +3735,11 @@ class Orchestrator:
             fields.append(f"\"state_of_mind\":{{{self._cognition_state_of_mind_schema()}}}")
         schema = self._compose_cognition_schema(fields)
         role = str(peer.get("role") or "").strip()
-        role_block = f"ROLE:\n{role}\n\n" if role else ""
+        role_block = (
+            f"ROLE:\n{role}\n\n"
+            if role
+            else ""
+        )
         return (
             "COGNITION SYSTEM3 PROPOSAL\n\n"
             "Devise a complete execution strategy, defend it, and choose whether system1 or system2 should execute it.\n\n"
@@ -3588,7 +3752,7 @@ class Orchestrator:
             "- Use only relevant grounded information from the provided context.\n"
             "- Do not mention hidden chain-of-thought; provide a compact strategic argument.\n\n"
             f"{role_block}"
-            f"{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2600, state_limit=2000)}"
+            f"STATE:\n{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2600, state_limit=2000)}\n\n"
             "RELEVANT MEMORY:\n"
             f"{self._format_cognition_memory_hits(memory_hits)}\n\n"
             "AVAILABLE TOOLS:\n"
@@ -3608,19 +3772,24 @@ class Orchestrator:
         safety_rules: List[Dict[str, Any]],
     ) -> str:
         role = str(critic.get("role") or "").strip()
-        role_block = f"ROLE:\n{role}\n\n" if role else ""
+        role_block = (
+            f"ROLE:\n{role}\n\n"
+            if role
+            else ""
+        )
         return (
             "COGNITION SYSTEM3 SCRUTINY\n\n"
             "Score the proposal and provide one concise critique.\n\n"
             "Respond with STRICT JSON only:\n"
-            "{\"type\":\"review\",\"critic_id\":\"...\",\"proposal_peer_id\":\"...\",\"score\":0.0,\"comment\":\"...\"}\n\n"
+            "{\"type\":\"review\",\"critic_id\":\"...\",\"proposal_peer_id\":\"...\",\"score\":0.0,\"blocking\":false,\"comment\":\"...\"}\n\n"
             "Rules:\n"
-            "- score must be on a 0 to 10 scale.\n"
+            "- score must be on a 0 to 10 scale; it is not a probability of successful execution.\n"
+            "- blocking: true for an unresolved correctness, feasibility, or safety failure that prevents this strategy from succeeding.\n"
             "- comment should focus on the main strengths and weaknesses.\n"
             "- Evaluate only the proposal shown.\n"
             "- Do not score yourself if the critic and proposer are the same peer.\n\n"
             f"{role_block}"
-            f"{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2600, state_limit=2000)}"
+            f"STATE:\n{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2600, state_limit=2000)}\n\n"
             "PROPOSAL UNDER REVIEW:\n"
             f"{self._truncate(self._safe_json(proposal), 2600)}\n\n"
             "RELEVANT MEMORY:\n"
@@ -3654,7 +3823,11 @@ class Orchestrator:
             fields.append(f"\"state_of_mind\":{{{self._cognition_state_of_mind_schema()}}}")
         schema = self._compose_cognition_schema(fields)
         role = str(peer.get("role") or "").strip()
-        role_block = f"ROLE:\n{role}\n\n" if role else ""
+        role_block = (
+            f"ROLE:\n{role}\n\n"
+            if role
+            else ""
+        )
         return (
             "COGNITION SYSTEM3 ADJUSTMENT\n\n"
             "Revise your strategy after reading peer proposals and scrutiny.\n\n"
@@ -3665,7 +3838,7 @@ class Orchestrator:
             "- revision_note should summarize what changed, if anything.\n"
             "- Keep the output focused on the final revised strategy.\n\n"
             f"{role_block}"
-            f"{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2600, state_limit=2000)}"
+            f"STATE:\n{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2600, state_limit=2000)}\n\n"
             "YOUR CURRENT PROPOSAL:\n"
             f"{self._truncate(self._safe_json(current_proposal), 2200)}\n\n"
             "OTHER PEER PROPOSALS:\n"
@@ -3681,8 +3854,10 @@ class Orchestrator:
         state_or_observations: Any,
         observations_or_trace: Any,
         thinking_trace_arg: Optional[List[Dict[str, Any]]] = None,
+        user_text: str = "",
     ) -> str:
         if isinstance(user_or_query_state, str):
+            user_text = user_text or user_or_query_state
             query_state = query_or_state_of_mind if isinstance(query_or_state_of_mind, dict) else {}
             state_of_mind = state_or_observations if isinstance(state_or_observations, dict) else {}
             observations = observations_or_trace if isinstance(observations_or_trace, list) else []
@@ -3710,8 +3885,11 @@ class Orchestrator:
             "Rules:\n"
             "- Use only grounded information from the user request, state, and observations.\n"
             f"{clarify_rule}"
+            "- Answer with the result available now; do not promise a future tool call or search.\n"
             "- Do not reveal internal state_of_mind unless the user explicitly asks for it.\n\n"
-            f"{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2600, state_limit=2200)}"
+            "USER REQUEST:\n"
+            f"{self._truncate(user_text or query_state.get('query_rewrite', ''), 2400)}\n\n"
+            f"STATE:\n{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2600, state_limit=2200)}\n\n"
             "OBSERVATIONS:\n"
             f"{self._format_agent_observations(observations)}\n\n"
             "THINKING TRACE:\n"
@@ -3728,8 +3906,10 @@ class Orchestrator:
         trace_or_tools: List[Dict[str, Any]],
         tools_or_patterns: List[Dict[str, Any]],
         patterns_arg: Optional[List[Dict[str, Any]]] = None,
+        user_text: str = "",
     ) -> str:
         if isinstance(user_or_result_payload, str):
+            user_text = user_text or user_or_result_payload
             result_payload = result_or_query_state if isinstance(result_or_query_state, dict) else {}
             query_state = query_or_state_of_mind if isinstance(query_or_state_of_mind, dict) else {}
             state_of_mind = state_or_observations if isinstance(state_or_observations, dict) else {}
@@ -3772,13 +3952,15 @@ class Orchestrator:
             f"{self._asi_pattern_source_shape()}\n\n"
             "Pattern source rules:\n"
             f"{self._asi_pattern_generation_rules_text()}\n"
-            #"AVAILABLE TOOLS:\n"
-            #f"{self._format_tools_for_agent(tools)}\n\n"
+            "USER REQUEST:\n"
+            f"{self._truncate(user_text or query_state.get('query_rewrite', ''), 2200)}\n\n"
+            "AVAILABLE TOOLS:\n"
+            f"{self._format_tools_for_agent(tools)}\n\n"
             "CALLABLE PATTERNS:\n"
             f"{self._format_cognition_callable_patterns_brief(patterns)}\n\n"
-            #"RESULT:\n"
-            #f"{self._truncate(self._safe_json(result_payload), 1600)}\n\n"
-            f"{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2200, state_limit=2200)}"
+            "EXECUTION RESULT:\n"
+            f"{self._truncate(self._safe_json(result_payload), 1600)}\n\n"
+            f"STATE:\n{self._format_cognition_optional_state_sections(query_state, state_of_mind, query_limit=2200, state_limit=2200)}\n\n"
             "OBSERVATIONS:\n"
             f"{self._format_agent_observations(observations)}\n\n"
             "THINKING TRACE:\n"
@@ -3793,6 +3975,7 @@ class Orchestrator:
     ) -> str:
         candidate_block = self._truncate(candidate_text, 3000)
         evidence_block = self._format_execution_evidence_for_critic(execution_evidence)
+        original_request = str((execution_evidence or {}).get("original_request", ""))
         actual_query_state = query_state
         if not actual_query_state and execution_evidence and execution_evidence.get("entity_kind") == "cognition_episode":
             actual_query_state = execution_evidence.get("entity", {}).get("query_state")
@@ -3807,18 +3990,22 @@ class Orchestrator:
         return (
             "Critique whether the candidate response fully satisfies the user request.\n\n"
             "Respond with STRICT JSON only:\n"
-            "{\"fulfilled\":true,\"confidence\":0.0,\"issues\":[\"...\"],\"fix_instructions\":[\"...\"]}\n\n"
+            "{\"fulfilled\":true,\"confidence\":0.0,\"requires_execution\":false,\"evidence_ids\":[],\"issues\":[\"...\"],\"fix_instructions\":[\"...\"]}\n\n"
             "Rules:\n"
             "- fulfilled: true only if the request is fully satisfied as stated.\n"
             "- If key content is missing, unclear, wrong, or unresolved placeholders remain, set fulfilled=false.\n"
             "- Use execution evidence when available to check factual and logical correctness.\n"
             "- When execution evidence includes tool results, prioritize those results over model prior knowledge.\n"
             "- Do not flag a response as wrong if it correctly reflects tool outputs.\n"
+            "- requires_execution: true when the original request requires external actions or verification.\n"
+            "- evidence_ids: cite the successful observations that establish the requested outcome; a successful tool call alone does not prove completion.\n"
+            "- Missing evidence, unfinished objectives, or an unresolved failed check means fulfilled=false.\n"
             "- confidence: number in [0,1].\n"
             "- issues: 0-6 concrete failures.\n"
             "- fix_instructions: 0-6 actionable instructions for a retry.\n"
             "- Do not add extra keys.\n\n"
-            f"{task_block}"
+            f"ORIGINAL USER REQUEST:\n{original_request}\n\n"
+            f"TASK STATE:\n{task_block}\n\n"
             "Candidate response:\n"
             f"{candidate_block}\n\n"
             "Execution evidence (optional):\n"
@@ -3937,6 +4124,10 @@ class Orchestrator:
         options_override: Optional[Dict[str, Any]] = None,
     ) -> str:
         try:
+            try:
+                print(f"[orchestrator] _generate_cognition_response_with_timeout timeout_s={timeout_s} event={timeout_event}")
+            except Exception:
+                pass
             if timeout_s > 0:
                 return await asyncio.wait_for(
                     self._generate_cognition_response(
@@ -5893,6 +6084,8 @@ class Orchestrator:
             score = float(parsed.get("score"))
         except (TypeError, ValueError):
             return None
+        if not math.isfinite(score):
+            return None
         if score < 0.0:
             score = 0.0
         if score > 10.0:
@@ -5903,6 +6096,7 @@ class Orchestrator:
             "proposal_peer_id": proposal_peer_id,
             "score": score,
             "comment": comment,
+            "blocking": parsed.get("blocking") is True,
         }
 
     def _parse_cognition_pattern_route_response(self, raw: str) -> Optional[Dict[str, Any]]:
@@ -5941,6 +6135,7 @@ class Orchestrator:
         *,
         allow_step: bool,
         allow_clarify: bool = True,
+        allow_actions: bool = True,
     ) -> Optional[Dict[str, Any]]:
         allowed_types = {"final", "act"}
         if allow_clarify:
@@ -5958,12 +6153,29 @@ class Orchestrator:
         query_state_delta = self._normalize_cognition_query_state_delta(parsed.get("query_state_delta", {}))
         state_of_mind_delta = self._normalize_cognition_state_of_mind_delta(parsed.get("state_of_mind_delta", {}))
         if resp_type == "final":
+            # Some local models correctly plan a tool call but incorrectly label
+            # the envelope as ``final``.  Silently ignoring those actions turns
+            # text such as "Let me search" into a user-facing result without
+            # ever running the search.  Recover the action in execution loops;
+            # finalization explicitly disables this path and triggers JSON repair.
+            raw_actions = parsed.get("actions")
+            if isinstance(raw_actions, list) and raw_actions:
+                actions = self._normalize_cognition_actions(raw_actions, limit=2)
+                if not actions or not allow_actions:
+                    return None
+                return {
+                    "type": "act",
+                    "thought": thought,
+                    "actions": actions,
+                    "query_state_delta": query_state_delta,
+                    "state_of_mind_delta": state_of_mind_delta,
+                }
             text = parsed.get("text", "")
             if not isinstance(text, str) or not text.strip():
                 answer = parsed.get("answer")
                 if isinstance(answer, str) and answer.strip():
                     text = answer
-            if not isinstance(text, str):
+            if not isinstance(text, str) or not text.strip():
                 return None
             return {
                 "type": "final",
@@ -6026,6 +6238,33 @@ class Orchestrator:
             "state_of_mind_delta": self._normalize_cognition_state_of_mind_delta(
                 parsed.get("state_of_mind_delta", {})
             ),
+        }
+
+    def _parse_cognition_system0_response(self, raw: str) -> Optional[Dict[str, Any]]:
+        parsed = self._parse_json_payload(
+            raw,
+            validator=lambda item: isinstance(item, dict) and item.get("type") in {"final", "escalate"},
+        )
+        if parsed is None or not isinstance(parsed, dict):
+            return None
+        response_type = str(parsed.get("type") or "").strip().lower()
+        if response_type == "escalate":
+            return {
+                "type": "escalate",
+                "thought": str(parsed.get("thought") or ""),
+                "reason": str(parsed.get("reason") or ""),
+            }
+        text = parsed.get("text", "")
+        if not isinstance(text, str) or not text.strip():
+            answer = parsed.get("answer")
+            if isinstance(answer, str) and answer.strip():
+                text = answer
+        if not isinstance(text, str) or not text.strip():
+            return None
+        return {
+            "type": "final",
+            "thought": str(parsed.get("thought") or ""),
+            "text": text,
         }
 
     def _cognition_result_payload_text(self, payload: Dict[str, Any]) -> str:
@@ -6116,7 +6355,7 @@ class Orchestrator:
             confidence = float(confidence_raw)
         except (TypeError, ValueError):
             confidence = 0.0
-        confidence = max(0.0, min(1.0, confidence))
+        confidence = max(0.0, min(1.0, confidence)) if math.isfinite(confidence) else 0.0
 
         issues_raw = parsed.get("issues", [])
         fixes_raw = parsed.get("fix_instructions", [])
@@ -6145,6 +6384,8 @@ class Orchestrator:
 
         return {
             "fulfilled": fulfilled,
+            "requires_execution": parsed.get("requires_execution") is True,
+            "evidence_ids": self._normalize_cognition_text_list(parsed.get("evidence_ids", []), limit=50),
             "confidence": confidence,
             "issues": issues,
             "fix_instructions": fixes,
@@ -6219,10 +6460,41 @@ class Orchestrator:
         if not proposals:
             return None
         scores = self._score_cognition_system3_proposals(proposals, reviews)
-        top_score = max(scores.get(str(item.get("peer_id") or "").strip().lower(), 0.0) for item in proposals)
-        candidates = [
+        safety_threshold = float(getattr(self, "_cognition_system3_safety_threshold", 7.0))
+        review_quorum = max(1, int(getattr(self, "_cognition_system3_review_quorum", 2)))
+        review_critics: Dict[str, Set[str]] = {}
+        for review in reviews:
+            if not isinstance(review, dict):
+                continue
+            target = str(review.get("proposal_peer_id") or "").strip().lower()
+            critic_id = str(review.get("critic_id") or "").strip().lower()
+            if not target or not critic_id:
+                continue
+            try:
+                float(review.get("score"))
+            except (TypeError, ValueError):
+                continue
+            review_critics.setdefault(target, set()).add(critic_id)
+
+        blocked_ids = {str(review.get("proposal_peer_id") or "").strip().lower()
+                       for review in reviews if review.get("blocking") is True}
+        eligible = [
             item
             for item in proposals
+            if (
+                str(item.get("peer_id") or "").strip().lower() not in blocked_ids
+                and len(review_critics.get(str(item.get("peer_id") or "").strip().lower(), set()))
+                >= review_quorum
+                and scores.get(str(item.get("peer_id") or "").strip().lower(), 0.0)
+                >= safety_threshold
+            )
+        ]
+        if not eligible:
+            return None
+        top_score = max(scores.get(str(item.get("peer_id") or "").strip().lower(), 0.0) for item in eligible)
+        candidates = [
+            item
+            for item in eligible
             if abs(scores.get(str(item.get("peer_id") or "").strip().lower(), 0.0) - top_score) < 1e-9
         ]
         preferred = [item for item in candidates if str(item.get("recommended_mode") or "").strip() == "system1"]
@@ -6230,7 +6502,11 @@ class Orchestrator:
             candidates = preferred
         rng = random.Random(trace_id or "cognition_system3")
         winner = dict(rng.choice(candidates))
-        winner["average_score"] = scores.get(str(winner.get("peer_id") or "").strip().lower(), 0.0)
+        winner_peer_id = str(winner.get("peer_id") or "").strip().lower()
+        winner["average_score"] = scores.get(winner_peer_id, 0.0)
+        winner["review_count"] = len(review_critics.get(winner_peer_id, set()))
+        winner["safety_threshold"] = safety_threshold
+        winner["review_quorum"] = review_quorum
         return winner
 
     async def _run_cognition_system3(
@@ -6423,7 +6699,7 @@ class Orchestrator:
                                 tools,
                                 safety_rules,
                             ),
-                            "{\"type\":\"review\",\"critic_id\":\"...\",\"proposal_peer_id\":\"...\",\"score\":0.0,\"comment\":\"...\"}",
+                            "{\"type\":\"review\",\"critic_id\":\"...\",\"proposal_peer_id\":\"...\",\"score\":0.0,\"blocking\":false,\"comment\":\"...\"}",
                             self._parse_cognition_system3_review_response,
                             f"system3_review_r{round_index}_{critic_name}_{target_peer_id}",
                             trace_id,
@@ -6463,6 +6739,14 @@ class Orchestrator:
             )
 
         winner = self._select_cognition_system3_winner(current_proposals, latest_reviews, trace_id)
+        run = ACTIVE_RUN.get()
+        if run is not None:
+            run["system3_review"] = {
+                "winner": winner, "reviews": latest_reviews,
+                "distinct_critic_models": len({str(peer.get("model")) for peer in critics}),
+                "note": "Strategy review only; execution still requires outcome verification.",
+            }
+            self._checkpoint_cognition(run)
         if winner is None:
             return None
         return {
@@ -6722,6 +7006,85 @@ class Orchestrator:
             fs_mode = str(fallback.get("fs", "read") or "read").strip().lower()
         return {"network": bool(network), "fs": fs_mode}
 
+    @staticmethod
+    def _normalize_blacklist_values(value: Any) -> List[str]:
+        if isinstance(value, str):
+            values = value.split(",")
+        elif isinstance(value, (list, tuple, set)):
+            values = list(value)
+        else:
+            values = []
+        normalized: List[str] = []
+        seen: Set[str] = set()
+        for item in values:
+            text = str(item or "").strip().lower()
+            if not text or text in seen:
+                continue
+            normalized.append(text)
+            seen.add(text)
+        return normalized
+
+    def _tool_blacklist_policy(self, source: Optional[Dict[str, Any]] = None) -> Tuple[List[str], List[str]]:
+        """Resolve the explicit tool-generation blacklist.
+
+        There is deliberately no built-in denylist. Administrators may still
+        provide one in settings, while a request can add narrower per-request
+        entries. ``blacklist_libraries`` is accepted as a convenience and is
+        checked both as an import/module name and as a callable/prefix.
+        """
+        source = source if isinstance(source, dict) else {}
+        settings = self._settings.orchestrator
+
+        module_values = self._normalize_blacklist_values(
+            settings.get("create_tool_blocked_modules", [])
+        )
+        module_values.extend(
+            self._normalize_blacklist_values(
+                settings.get("create_tool_extra_blocked_modules", [])
+            )
+        )
+        allowed_imports = set(
+            self._normalize_blacklist_values(settings.get("create_tool_allowed_imports", []))
+        )
+        module_values = [item for item in module_values if item not in allowed_imports]
+
+        for key in ("blacklist_modules", "blocked_modules"):
+            module_values.extend(self._normalize_blacklist_values(source.get(key)))
+        for key in ("blacklist_calls", "blocked_calls"):
+            call_values = self._normalize_blacklist_values(source.get(key))
+            break
+        else:
+            call_values = []
+        library_values = self._normalize_blacklist_values(
+            source.get("blacklist_libraries", source.get("blacklist", []))
+        )
+        module_values.extend(library_values)
+        call_values.extend(library_values)
+
+        def unique(values: List[str]) -> List[str]:
+            result: List[str] = []
+            seen: Set[str] = set()
+            for value in values:
+                if value and value not in seen:
+                    result.append(value)
+                    seen.add(value)
+            return result
+
+        return unique(module_values), unique(call_values)
+
+    @staticmethod
+    def _blacklist_matches(value: str, blacklist: List[str]) -> bool:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return False
+        root = normalized.split(".", 1)[0]
+        return any(
+            normalized == blocked
+            or root == blocked
+            or normalized.startswith(blocked + ".")
+            for blocked in blacklist
+        )
+
     def _load_registry_specs(self) -> List[Dict[str, Any]]:
         registry_path = os.path.join(self._settings.workspace_root, "config", "tool_registry.json")
         try:
@@ -6800,6 +7163,8 @@ class Orchestrator:
         if not isinstance(constraints, dict):
             constraints = {}
 
+        blacklist_modules, blacklist_calls = self._tool_blacklist_policy(spec)
+
         default_sandbox_profile = self._normalize_sandbox_profile(spec.get("default_sandbox_profile"))
         tool_hints = spec.get("tool_hints", [])
         if not isinstance(tool_hints, list):
@@ -6841,6 +7206,8 @@ class Orchestrator:
             "request": request,
             "goals": goals,
             "constraints": constraints,
+            "blacklist_modules": blacklist_modules,
+            "blacklist_calls": blacklist_calls,
             "namespace_prefix": namespace_prefix,
             "max_tools": max_tools,
             "default_permissions": default_permissions,
@@ -7000,6 +7367,8 @@ class Orchestrator:
             "examples": examples,
             "timeouts_ms": timeouts_ms,
             "resource_limits": resource_limits,
+            "blacklist_modules": list(generation_spec.get("blacklist_modules", [])),
+            "blacklist_calls": list(generation_spec.get("blacklist_calls", [])),
             "version": str(item.get("version") or "0.1.0").strip() or "0.1.0",
         }, None
 
@@ -7020,21 +7389,32 @@ class Orchestrator:
         input_schema_hint: Optional[Dict[str, Any]],
         output_schema_hint: Optional[Dict[str, Any]],
         capabilities_hint: Optional[List[str]] = None,
+        dependencies_hint: Optional[List[str]] = None,
+        blacklist_modules: Optional[List[str]] = None,
+        blacklist_calls: Optional[List[str]] = None,
     ) -> str:
         input_hint = self._safe_json(input_schema_hint) if isinstance(input_schema_hint, dict) else "null"
         output_hint = self._safe_json(output_schema_hint) if isinstance(output_schema_hint, dict) else "null"
-        allow_local_subprocess = bool(
-            tool_id.startswith("embodiment.generated.")
-            or (
-                isinstance(capabilities_hint, list)
-                and any(str(item).strip().lower() == "embodiment" for item in capabilities_hint)
-            )
+        dependencies_hint_text = (
+            self._safe_json(dependencies_hint)
+            if isinstance(dependencies_hint, list)
+            else "[]"
         )
-        extra_rule = ""
-        if allow_local_subprocess:
-            extra_rule = (
-                "- For embodiment-generated tools only, local subprocess calls to device CLI utilities are allowed, "
-                "but never use shell=True and never use network access.\n"
+        blacklist_modules_text = self._safe_json(blacklist_modules or [])
+        blacklist_calls_text = self._safe_json(blacklist_calls or [])
+        available_tools: List[Dict[str, Any]] = []
+        seen_tool_ids: Set[str] = set()
+        for candidate in self._load_registry_specs() + self._load_generated_specs():
+            candidate_id = str(candidate.get("tool_id") or "").strip()
+            if not candidate_id or candidate_id in seen_tool_ids or candidate_id == tool_id:
+                continue
+            seen_tool_ids.add(candidate_id)
+            available_tools.append(
+                {
+                    "tool_id": candidate_id,
+                    "name": candidate.get("name", ""),
+                    "description": candidate.get("description", ""),
+                }
             )
         return (
             "TOOL CODEGEN PROMPT\n\n"
@@ -7045,24 +7425,31 @@ class Orchestrator:
             "\"code\":\"...\",\"dependencies\":[\"...\"]}\n\n"
             "RULES:\n"
             "- \"code\" is Python function-body code only; do not include a def line.\n"
-            "- The generated function receives (args, workspace_root).\n"
+            "- The generated function receives (args, workspace_root) and has a local call_tool helper.\n"
             "- The code must return a tuple: (result_dict, io_dict).\n"
             "- Import every module you use inside the generated body, including Python stdlib modules.\n"
             "- Do not rely on module-level imports outside the generated body.\n"
             "- Handle errors in code and return an error result instead of raising when possible.\n"
             "- On invalid input, return a structured error like {\"status\":\"ERROR\",\"error\":\"...\"}.\n"
             "- For file/path args, support workspace:/ refs and normalize to absolute workspace paths before I/O.\n"
-            f"{extra_rule}"
             "- \"dependencies\" must include only non-stdlib packages; use [] if none.\n"
+            "- Use call_tool(\"tool.id\", {\"arg\": value}) to compose previously available tools. "
+            "It returns (result_dict, io_dict); do not make RPC calls yourself.\n"
+            f"- Requested dependency hints: {dependencies_hint_text}\n"
+            f"- Blacklisted modules/libraries: {blacklist_modules_text}\n"
+            f"- Blacklisted calls/libraries: {blacklist_calls_text}\n"
+            "- Never import or call an explicitly blacklisted entry.\n"
             "- \"input_schema\" and \"output_schema\" must be valid JSON Schema objects.\n"
             "- If schema hints are provided, keep them unless clearly invalid.\n\n"
-            "- The tool will be executed to fulfill similar tasks so it should be general and rigorous"
+            "- The tool will be executed to fulfill similar tasks so it should be general and rigorous.\n\n"
             "TOOL REQUEST:\n"
             f"- tool_id: {tool_id}\n"
             f"- description: {description}\n"
             f"- name_hint: {name_hint if name_hint else '(none)'}\n"
             f"- input_schema_hint: {input_hint}\n"
             f"- output_schema_hint: {output_hint}\n"
+            "- previously_available_tools: "
+            f"{self._truncate(self._safe_json(available_tools), 8000)}\n"
         )
 
     def _parse_tool_codegen_response(self, raw: str) -> Optional[Dict[str, Any]]:
@@ -7104,7 +7491,12 @@ class Orchestrator:
             "dependencies": deps,
         }
 
-    def _validate_generated_tool_code(self, code: str, allow_local_subprocess: bool = False) -> Optional[str]:
+    def _validate_generated_tool_code(
+        self,
+        code: str,
+        blacklist_modules: Optional[List[str]] = None,
+        blacklist_calls: Optional[List[str]] = None,
+    ) -> Optional[str]:
         if not isinstance(code, str) or not code.strip():
             return "Generated code is empty."
         body = code.splitlines()
@@ -7113,6 +7505,9 @@ class Orchestrator:
         source = "\n".join(wrapper_lines) + "\n"
         try:
             module = ast.parse(source)
+            # Parsing alone accepts invalid executable constructs such as break
+            # outside a loop. Compile without executing untrusted side effects.
+            compile(module, '<generated-tool-validation>', 'exec')
         except SyntaxError as exc:
             return f"Generated code has invalid syntax: {exc.msg}"
         if not module.body or not isinstance(module.body[0], ast.FunctionDef):
@@ -7126,50 +7521,16 @@ class Orchestrator:
         )
         if safety_enabled is False:
             return None
-        default_blocked_modules = {
-            "socket",
-            "http",
-            "urllib",
-            "ftplib",
-            "telnetlib",
-            "requests",
-            "paramiko",
+        blocked_modules = {
+            str(item).strip().lower().split(".", 1)[0]
+            for item in (blacklist_modules or [])
+            if str(item).strip()
         }
-        configured_blocked_modules = self._settings.orchestrator.get("create_tool_blocked_modules")
-        if isinstance(configured_blocked_modules, list):
-            blocked_modules = {
-                str(item).strip().split(".", 1)[0]
-                for item in configured_blocked_modules
-                if str(item).strip()
-            }
-        else:
-            blocked_modules = set(default_blocked_modules)
-        extra_blocked_modules = self._settings.orchestrator.get("create_tool_extra_blocked_modules", [])
-        if isinstance(extra_blocked_modules, list):
-            blocked_modules.update(
-                str(item).strip().split(".", 1)[0]
-                for item in extra_blocked_modules
-                if str(item).strip()
-            )
-        allowed_imports = self._settings.orchestrator.get("create_tool_allowed_imports", [])
-        if isinstance(allowed_imports, list):
-            blocked_modules.difference_update(
-                str(item).strip().split(".", 1)[0]
-                for item in allowed_imports
-                if str(item).strip()
-            )
-        if not allow_local_subprocess:
-            blocked_modules.add("subprocess")
-        blocked_calls = {"eval", "exec", "compile", "__import__"}
-        blocked_call_prefixes = (
-            "os.system",
-            "os.popen",
-            "os.spawn",
-            "shutil.rmtree",
-            "pty.",
-        )
-        if not allow_local_subprocess:
-            blocked_call_prefixes = blocked_call_prefixes + ("subprocess.",)
+        blocked_call_values = [
+            str(item).strip().lower()
+            for item in (blacklist_calls or [])
+            if str(item).strip()
+        ]
         for node in ast.walk(fn_node):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -7182,16 +7543,8 @@ class Orchestrator:
                     return f"Blocked import in generated code: {node.module}"
             elif isinstance(node, ast.Call):
                 call_name = self._call_target_name(node.func)
-                if call_name in blocked_calls:
+                if self._blacklist_matches(call_name, blocked_call_values):
                     return f"Blocked call in generated code: {call_name}"
-                if allow_local_subprocess and call_name.startswith("subprocess."):
-                    for keyword in node.keywords:
-                        if keyword.arg == "shell":
-                            if isinstance(keyword.value, ast.Constant) and keyword.value.value is True:
-                                return "Embodiment-generated code may not use shell=True."
-                for prefix in blocked_call_prefixes:
-                    if call_name.startswith(prefix):
-                        return f"Blocked call in generated code: {call_name}"
         return None
 
     def _call_target_name(self, node: ast.AST) -> str:
@@ -7230,6 +7583,14 @@ class Orchestrator:
             "# Auto-generated file. Do not edit by hand.",
             "from typing import Any, Dict, Tuple",
             "",
+            "def _fallback_call_tool(tool_id: str, args: Dict[str, Any], workspace_root: str):",
+            "    registry = generated_registry()",
+            "    spec = registry.get(tool_id)",
+            "    if not isinstance(spec, dict) or not callable(spec.get('fn')):",
+            "        return {'status': 'ERROR', 'error': f'Unknown nested tool: {tool_id}'}, {}",
+            "    fn = spec['fn']",
+            "    return fn(args, workspace_root)",
+            "",
         ]
         registry_lines = []
         for spec in specs:
@@ -7237,7 +7598,16 @@ class Orchestrator:
             code = spec.get("code", "")
             tier = int(spec.get("tier", 1))
             fn_name = self._sanitize_tool_fn_name(tool_id)
-            lines.append(f"def {fn_name}(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:")
+            lines.append(
+                f"def {fn_name}(args: Dict[str, Any], workspace_root: str, _tool_call=None) "
+                "-> Tuple[Dict[str, Any], Dict[str, Any]]:"
+            )
+            lines.append("    def call_tool(nested_tool_id, nested_args):")
+            lines.append("        if not isinstance(nested_args, dict):")
+            lines.append("            return {'status': 'ERROR', 'error': 'Nested tool args must be an object'}, {}")
+            lines.append("        if callable(_tool_call):")
+            lines.append("            return _tool_call(nested_tool_id, nested_args)")
+            lines.append("        return _fallback_call_tool(nested_tool_id, nested_args, workspace_root)")
             lines.append("    try:")
             if code:
                 for line in code.splitlines():
@@ -7259,6 +7629,76 @@ class Orchestrator:
             lines.append("    return {}")
         lines.append("")
         return "\n".join(lines)
+
+    def _ensure_generated_dependencies(
+        self,
+        dependencies: List[str],
+        blacklist_modules: List[str],
+        blacklist_calls: List[str],
+    ) -> Optional[str]:
+        if not dependencies:
+            return None
+
+        normalized: List[str] = []
+        seen: Set[str] = set()
+        stdlib = set(getattr(sys, "stdlib_module_names", set()))
+        for dependency in dependencies:
+            requirement = str(dependency or "").strip()
+            if not requirement:
+                continue
+            if "\x00" in requirement or "\n" in requirement or "\r" in requirement:
+                return "Dependency contains an invalid control character"
+            if requirement.startswith("-"):
+                return f"Dependency must not be a pip option: {requirement}"
+            match = re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*", requirement)
+            package_root = match.group(0).lower().replace("-", "_") if match else ""
+            requirement_root = package_root.replace("_", "-")
+            blocked_dependency = any(
+                requirement_root == blocked.replace("_", "-").split(".", 1)[0]
+                or package_root == blocked.replace("-", "_").split(".", 1)[0]
+                for blocked in (blacklist_modules + blacklist_calls)
+            )
+            if blocked_dependency:
+                return f"Dependency is blacklisted: {requirement}"
+            if package_root in stdlib:
+                continue
+            if requirement not in seen:
+                normalized.append(requirement)
+                seen.add(requirement)
+
+        if not normalized:
+            return None
+
+        try:
+            timeout_s = float(self._settings.orchestrator.get("create_tool_dependency_timeout_s", 120))
+        except (TypeError, ValueError):
+            timeout_s = 120.0
+        timeout_s = max(1.0, min(timeout_s, 1800.0))
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--quiet",
+            *normalized,
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                cwd=self._settings.workspace_root,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"Dependency installation failed: {exc}"
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            return f"Dependency installation failed: {self._truncate(detail, 800)}"
+        return None
 
     def _update_tool_registry(self, spec: Dict[str, Any]) -> Optional[str]:
         registry_path = os.path.join(self._settings.workspace_root, "config", "tool_registry.json")
@@ -7282,6 +7722,8 @@ class Orchestrator:
             "output_schema": spec.get("output_schema", {}),
             "dependencies": spec.get("dependencies", []),
             "capabilities": spec.get("capabilities", []),
+            "blacklist_modules": spec.get("blacklist_modules", []),
+            "blacklist_calls": spec.get("blacklist_calls", []),
             "risk_level_default": spec.get("risk_level_default", "MEDIUM"),
             "required_permissions": spec.get("required_permissions", ["tier1"]),
             "examples": spec.get("examples", []),
@@ -7302,6 +7744,8 @@ class Orchestrator:
         spec: Dict[str, Any],
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        if _CURRENT_AUTONOMY.get() is not None:
+            return {"status": "DENIED", "error": "Tool generation requires an explicit interactive request"}
         resolved_trace_id = trace_id or new_id()
         normalized_spec, spec_error = self._normalize_tool_generation_spec(spec)
         if spec_error:
@@ -7319,7 +7763,14 @@ class Orchestrator:
         )
         base_prompt = self._build_tool_blueprint_prompt(normalized_spec)
         prompt = base_prompt
-        planning_context = {"summary": "", "memory": [], "suppress_summary_memory": True}
+        active_turn_id = _CURRENT_TURN_ID.get()
+        turn_context = self._turn_context_packet.get(active_turn_id or "", {})
+        planning_context = {
+            "summary": "",
+            "memory": [],
+            "current_time": turn_context.get("current_time", ""),
+            "suppress_summary_memory": True,
+        }
         blueprint: Optional[Dict[str, Any]] = None
         validation_error = ""
         attempts_setting = self._settings.orchestrator.get("tool_blueprint_max_attempts", 3)
@@ -7511,23 +7962,14 @@ class Orchestrator:
             },
         }
 
-    async def bootstrap_embodiment(self, manifest_path: Optional[str] = None) -> Dict[str, Any]:
-        from embodiment.bootstrap import EmbodimentBootstrap
-
-        bootstrap = EmbodimentBootstrap(settings=self._settings)
-        trace_id = new_id()
-
-        async def _create_tool(spec: Dict[str, Any]) -> Dict[str, Any]:
-            return await self._handle_create_tool(spec, trace_id)
-
-        return await bootstrap.apply(_create_tool, manifest_path=manifest_path)
-
     async def _handle_create_tool(
         self,
         args: Dict[str, Any],
         trace_id: str,
         skip_permission_request: bool = False,
     ) -> Dict[str, Any]:
+        if _CURRENT_AUTONOMY.get() is not None:
+            return {"status": "DENIED", "error": "Tool generation requires an explicit interactive request"}
         if not self._auto_approve_all and not skip_permission_request:
             token = await self._request_permission("create_tool", "Create a new tool")
             if not token:
@@ -7557,6 +7999,11 @@ class Orchestrator:
         capabilities_hint = args.get("capabilities", [])
         if capabilities_hint is not None and not isinstance(capabilities_hint, list):
             return {"status": "ERROR", "error": "capabilities must be an array when provided"}
+        dependencies_hint = args.get("dependencies", [])
+        if dependencies_hint is not None and not isinstance(dependencies_hint, list):
+            return {"status": "ERROR", "error": "dependencies must be an array when provided"}
+        dependencies_hint = [str(item).strip() for item in dependencies_hint if str(item).strip()]
+        blacklist_modules, blacklist_calls = self._tool_blacklist_policy(args)
 
         specs = self._load_generated_specs()
         existing_tool = self._find_existing_tool_spec(tool_id, generated_specs=specs)
@@ -7584,9 +8031,19 @@ class Orchestrator:
             input_schema_hint=input_schema_hint if isinstance(input_schema_hint, dict) else None,
             output_schema_hint=output_schema_hint if isinstance(output_schema_hint, dict) else None,
             capabilities_hint=capabilities_hint if isinstance(capabilities_hint, list) else None,
+            dependencies_hint=dependencies_hint,
+            blacklist_modules=blacklist_modules,
+            blacklist_calls=blacklist_calls,
         )
         prompt = base_prompt
-        codegen_context = {"summary": "", "memory": [], "suppress_summary_memory": True}
+        active_turn_id = _CURRENT_TURN_ID.get()
+        turn_context = self._turn_context_packet.get(active_turn_id or "", {})
+        codegen_context = {
+            "summary": "",
+            "memory": [],
+            "current_time": turn_context.get("current_time", ""),
+            "suppress_summary_memory": True,
+        }
         generated: Optional[Dict[str, Any]] = None
         validation_error = ""
         max_attempts_setting = self._settings.orchestrator.get("create_tool_max_attempts", 4)
@@ -7594,7 +8051,7 @@ class Orchestrator:
         if isinstance(max_attempts_setting, str):
             normalized_attempts = max_attempts_setting.strip().lower()
             if normalized_attempts in {"infinite", "infinity"}:
-                max_attempts = None
+                max_attempts = 8
             else:
                 try:
                     max_attempts = int(normalized_attempts)
@@ -7612,13 +8069,6 @@ class Orchestrator:
                 max_attempts = 8
 
         attempt = 0
-        allow_local_subprocess = bool(
-            tool_id.startswith("embodiment.generated.")
-            or (
-                isinstance(capabilities_hint, list)
-                and any(str(item).strip().lower() == "embodiment" for item in capabilities_hint)
-            )
-        )
         while True:
             if max_attempts is not None and attempt >= max_attempts:
                 break
@@ -7665,9 +8115,14 @@ class Orchestrator:
                 if not isinstance(candidate_input_schema, dict) or not isinstance(candidate_output_schema, dict):
                     validation_error = "Generated schema is invalid."
                 else:
+                    candidate_dependencies = list(dependencies_hint)
+                    for dependency in parsed.get("dependencies", []):
+                        if dependency not in candidate_dependencies:
+                            candidate_dependencies.append(dependency)
                     static_validation_error = self._validate_generated_tool_code(
                         parsed.get("code", ""),
-                        allow_local_subprocess=allow_local_subprocess,
+                        blacklist_modules=blacklist_modules,
+                        blacklist_calls=blacklist_calls,
                     ) or ""
                     if static_validation_error:
                         validation_error = static_validation_error
@@ -7678,7 +8133,7 @@ class Orchestrator:
                             input_schema=candidate_input_schema,
                             output_schema=candidate_output_schema,
                             code=parsed.get("code", ""),
-                            dependencies=parsed.get("dependencies", []),
+                            dependencies=candidate_dependencies,
                             trace_id=trace_id,
                             attempt=attempt,
                         )
@@ -7708,24 +8163,34 @@ class Orchestrator:
                             },
                         )
                         if critic_approved:
-                            generated = dict(parsed)
-                            generated["input_schema"] = candidate_input_schema
-                            generated["output_schema"] = candidate_output_schema
-                            break
-                        error_parts: List[str] = []
-                        if issues:
-                            error_parts.extend(str(item).strip() for item in issues if str(item).strip())
-                        if fixes:
-                            fix_text = "; ".join(str(item).strip() for item in fixes if str(item).strip())
-                            if fix_text:
-                                error_parts.append(f"Fix: {fix_text}")
-                        threshold_text = f"{self._tool_codegen_critic_min_confidence:.2f}"
-                        validation_error = (
-                            "Codegen critic rejected candidate "
-                            f"(fulfilled={bool(critic_result.get('fulfilled') is True)}, confidence={critic_confidence:.2f}, threshold={threshold_text})"
-                        )
-                        if error_parts:
-                            validation_error += ": " + "; ".join(error_parts[:6])
+                            dependency_error = self._ensure_generated_dependencies(
+                                candidate_dependencies,
+                                blacklist_modules,
+                                blacklist_calls,
+                            )
+                            if dependency_error:
+                                validation_error = dependency_error
+                            else:
+                                generated = dict(parsed)
+                                generated["input_schema"] = candidate_input_schema
+                                generated["output_schema"] = candidate_output_schema
+                                generated["dependencies"] = candidate_dependencies
+                                break
+                        if not critic_approved:
+                            error_parts: List[str] = []
+                            if issues:
+                                error_parts.extend(str(item).strip() for item in issues if str(item).strip())
+                            if fixes:
+                                fix_text = "; ".join(str(item).strip() for item in fixes if str(item).strip())
+                                if fix_text:
+                                    error_parts.append(f"Fix: {fix_text}")
+                            threshold_text = f"{self._tool_codegen_critic_min_confidence:.2f}"
+                            validation_error = (
+                                "Codegen critic rejected candidate "
+                                f"(fulfilled={bool(critic_result.get('fulfilled') is True)}, confidence={critic_confidence:.2f}, threshold={threshold_text})"
+                            )
+                            if error_parts:
+                                validation_error += ": " + "; ".join(error_parts[:6])
             self._log_mode_event(
                 PRIMARY_REASONING_MODE,
                 "create_tool_codegen_validation_error",
@@ -7771,6 +8236,8 @@ class Orchestrator:
             "code": generated.get("code", ""),
             "dependencies": [d for d in dependencies if isinstance(d, str) and d.strip()],
             "capabilities": args.get("capabilities", []),
+            "blacklist_modules": blacklist_modules,
+            "blacklist_calls": blacklist_calls,
             "tier": int(args.get("tier", 1)),
             "risk_level_default": args.get("risk_level_default", "MEDIUM"),
             "required_permissions": args.get("required_permissions", ["tier1"]),
@@ -7818,12 +8285,27 @@ class Orchestrator:
         for action in actions[:action_budget]:
             label = action.get("label", "")
             step_result = await self._execute_cognition_action(action, trace_id)
+            observation = step_result.get('observation', {})
+            details = observation.get('error_details') or {}
+            state = self._recovery_state(trace_id)
+            if (details.get('code') in {'SOURCE_MISMATCH', 'MISSING_CAPABILITY', 'UNSUPPORTED_PLATFORM',
+                                        'UNAVAILABLE_SOURCE', 'MISSING_DEPENDENCY'}
+                    and state['searches'] < 2 and action.get('tool_id')):
+                intent = action.get('intent') or {}
+                query = intent.get('operation') or state.get('query') or action['tool_id']
+                search = await self._retrieve_tools_action({
+                    'action_type': 'retrieve_tools', 'query': query, 'intent': intent,
+                    'exclude_tool_ids': [action['tool_id']],
+                }, trace_id)
+                observation['recovery_search'] = search['observation']
+                step_result['new_tools'] = step_result.get('new_tools', []) + search.get('new_tools', [])
             new_tools = step_result.get("new_tools", [])
             if isinstance(tools, list) and isinstance(new_tools, list) and new_tools:
                 merged_tools = self._merge_relevant_tool_lists(tools, new_tools)
                 tools[:] = merged_tools
             observations.append(
                 {
+                    "evidence_id": observation.get("evidence_id") or (f"obs-{len(ACTIVE_RUN.get().get('observations', [])) + len(observations) + 1}" if ACTIVE_RUN.get() else f"obs-{len(observations) + 1}"),
                     "label": label,
                     "action": step_result.get("action"),
                     "observation": step_result.get("observation"),
@@ -7839,6 +8321,7 @@ class Orchestrator:
         thinking_trace: List[Dict[str, Any]],
         trace_id: str,
         turn_id: Optional[str],
+        user_text: str = "",
     ) -> Dict[str, Any]:
         final_schema = (
             "{\"type\":\"final\",\"thought\":\"...\",\"text\":\"...\"}\n"
@@ -7849,6 +8332,7 @@ class Orchestrator:
             state_of_mind,
             observations,
             thinking_trace,
+            user_text=user_text,
         )
         raw = await self._generate_cognition_response(prompt, trace_id, turn_id)
         self._log_mode_event(
@@ -7856,7 +8340,7 @@ class Orchestrator:
             "final_raw",
             {"trace_id": trace_id, "raw": self._truncate(raw, 2000)},
         )
-        parsed = self._parse_cognition_thinking_response(raw, allow_step=False)
+        parsed = self._parse_cognition_thinking_response(raw, allow_step=False, allow_actions=False)
         if parsed is None:
             repair_prompt = self._build_json_repair_prompt(final_schema, raw)
             repaired = await self._generate_cognition_response_with_timeout(
@@ -7873,11 +8357,32 @@ class Orchestrator:
                 "final_repair_raw",
                 {"trace_id": trace_id, "raw": self._truncate(repaired, 2000)},
             )
-            parsed = self._parse_cognition_thinking_response(repaired, allow_step=False)
+            parsed = self._parse_cognition_thinking_response(repaired, allow_step=False, allow_actions=False)
         if parsed is None:
+            # Preserve executable evidence when the model and JSON repair both
+            # fail. Retrieved memories or malformed prose must not replace the
+            # actual tool error (e.g. claim grounding failed after it succeeded).
+            unresolved = {}
+            for step in observations:
+                action = step.get('action') or {}
+                observation = step.get('observation') or {}
+                tool_id = action.get('tool_id')
+                if not tool_id or tool_id == 'retrieve_tools':
+                    continue
+                if observation.get('status') == 'APPROVED':
+                    unresolved.pop(tool_id, None)
+                elif observation.get('error'):
+                    unresolved[tool_id] = observation
+            failure_text = "I couldn't produce a reliable cognition result. Please try again."
+            if unresolved:
+                tool_id = next(reversed(unresolved))
+                observation = unresolved[tool_id]
+                code = (observation.get('error_details') or {}).get('code', 'UNKNOWN')
+                failure_text = (f"I couldn't complete the request. {tool_id} failed ({code}): "
+                                f"{str(observation['error'])[:1500]}")
             return {
                 "type": "final",
-                "text": "I couldn't produce a reliable cognition result. Please try again.",
+                "text": failure_text,
                 "thought": "Fallback after parse failure.",
             }
         if parsed.get("type") == "clarify":
@@ -7897,6 +8402,7 @@ class Orchestrator:
         turn_id: Optional[str],
         *,
         budget_exhausted: bool = False,
+        user_text: str = "",
     ) -> Dict[str, Any]:
         if not self._cognition_distill_enabled:
             return {
@@ -7924,6 +8430,7 @@ class Orchestrator:
             thinking_trace,
             tools,
             patterns,
+            user_text=user_text,
         )
         # Prepend a conservative distillation note when reasoning was budget-exhausted
         if budget_exhausted:
@@ -7977,127 +8484,10 @@ class Orchestrator:
             }
         return parsed
 
-    async def _persist_cognition_distillation(
-        self,
-        distillation: Dict[str, Any],
-        trace_id: str,
-    ) -> Dict[str, int]:
-        reusable_skills = distillation.get("reusable_skills", [])
-        patterns = distillation.get("patterns", [])
-        failure_lessons = distillation.get("failure_lessons", [])
-        safety_rules = distillation.get("safety_rules", [])
-        memory_facts = distillation.get("memory_facts", [])
-        # Filter out low-confidence distillation entries to avoid polluting catalogs
-        # with hallucinated or weakly-supported skills/patterns/lessons.
-        _min_conf = getattr(self, "_cognition_distill_min_confidence", 0.55)
-        def _meets_confidence(item: Any) -> bool:
-            if not isinstance(item, dict):
-                return False
-            try:
-                return float(item.get("confidence", 0)) >= _min_conf
-            except (TypeError, ValueError):
-                return False
-        reusable_skills = [s for s in reusable_skills if _meets_confidence(s)]
-        patterns = [p for p in patterns if _meets_confidence(p)]
-        failure_lessons = [l for l in failure_lessons if _meets_confidence(l)]
-        safety_rules = [r for r in safety_rules if _meets_confidence(r)]
-        memory_facts = [f for f in memory_facts if _meets_confidence(f)]
+    async def _persist_cognition_distillation(self, distillation, trace_id):
+        raise RuntimeError("Direct cognition memory persistence is disabled; review provisional learning instead")
 
-        _, changed_skills = self._upsert_cognition_catalog(
-            self._cognition_skills_path,
-            reusable_skills,
-            self._normalize_cognition_skill,
-            "skill_id",
-        )
-        _, changed_patterns = self._upsert_cognition_catalog(
-            self._cognition_patterns_path,
-            patterns,
-            self._normalize_cognition_pattern,
-            "pattern_id",
-        )
-        _, changed_lessons = self._upsert_cognition_catalog(
-            self._cognition_lessons_path,
-            failure_lessons,
-            self._normalize_cognition_lesson,
-            "lesson_id",
-        )
-        _, changed_safety_rules = self._upsert_cognition_catalog(
-            self._cognition_safety_rules_path,
-            safety_rules,
-            self._normalize_cognition_safety_rule,
-            "rule_id",
-        )
-
-        for skill in changed_skills:
-            await self._memory.store_entity(
-                str(skill.get("skill_id") or ""),
-                skill,
-                trace_id,
-                confidence=float(skill.get("confidence", 0.5)),
-            )
-        for pattern in changed_patterns:
-            await self._memory.store_entity(
-                str(pattern.get("pattern_id") or ""),
-                pattern,
-                trace_id,
-                confidence=float(pattern.get("confidence", 0.5)),
-            )
-        for lesson in changed_lessons:
-            await self._memory.store_entity(
-                str(lesson.get("lesson_id") or ""),
-                lesson,
-                trace_id,
-                confidence=float(lesson.get("confidence", 0.5)),
-            )
-        for rule in changed_safety_rules:
-            await self._memory.store_entity(
-                str(rule.get("rule_id") or ""),
-                rule,
-                trace_id,
-                confidence=float(rule.get("confidence", 0.5)),
-            )
-
-        fact_count = 0
-        if isinstance(memory_facts, list):
-            for item in memory_facts:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name") or "").strip()
-                value = str(item.get("value") or "").strip()
-                if not name or not value:
-                    continue
-                existing = await self._memory.get_facts(name)
-                duplicate = False
-                for fact in existing:
-                    if not isinstance(fact, dict):
-                        continue
-                    fact_name = str(fact.get("name") or "").strip()
-                    data = fact.get("data", {})
-                    fact_value = ""
-                    if isinstance(data, dict):
-                        fact_value = str(data.get("value") or "").strip()
-                    if fact_name == name and fact_value == value:
-                        duplicate = True
-                        break
-                if duplicate:
-                    continue
-                await self._memory.store_fact(
-                    name,
-                    value,
-                    trace_id,
-                    confidence=self._normalize_cognition_confidence(item.get("confidence"), default=0.5),
-                )
-                fact_count += 1
-
-        return {
-            "skills": len(changed_skills),
-            "facts": fact_count,
-            "patterns": len(changed_patterns),
-            "lessons": len(changed_lessons),
-            "safety_rules": len(changed_safety_rules),
-        }
-
-    async def _run_cognition_loop(
+    async def _run_cognition_pass(
         self,
         text: str,
         context_packet: Dict[str, Any],
@@ -8106,22 +8496,136 @@ class Orchestrator:
         retrieval_query: Optional[str] = None,
         forced_execution_mode: Optional[str] = None,
         skip_distillation: bool = False,
+        resume_state: Optional[Dict[str, Any]] = None,
     ) -> str:
-        retrieve_text = retrieval_query.strip() if isinstance(retrieval_query, str) and retrieval_query.strip() else text
-        memory_hits = await self._memory.retrieve(retrieve_text, top_k=self._memory_retrieval_k)
-        retrieved_tools = await self._retrieve_relevant_tools(retrieve_text, self._tool_retrieval_k)
+        # System0 is the normal semantic triviality gate. A configured force
+        # system is an explicit override and must be dispatched directly.
+        system0_thinking_trace: List[Dict[str, Any]] = []
+        system0_result_payload: Optional[Dict[str, Any]] = None
+        configured_force_system = (
+            self._cognition_force_system if self._cognition_system0_enabled else ""
+        )
+        await self._refresh_cognition_time_context(context_packet, trace_id, turn_id)
+
+        # Prepare the conversational context before any cognition regime runs.
+        # System0 needs the same semantic summary and memory that later stages
+        # use, and an escalation must reuse these results rather than querying
+        # memory a second time.
+        retrieve_text = (
+            retrieval_query.strip()
+            if isinstance(retrieval_query, str) and retrieval_query.strip()
+            else text
+        )
+        semantic_summary = ""
+        if "semantic" in self._cognition_context_sources:
+            semantic_summary = await self._compute_semantic_context_summary(
+                context_packet,
+                text,
+                trace_id,
+                turn_id,
+        )
+        memory_hits: List[Dict[str, Any]] = []
+        if "memory" in self._cognition_context_sources:
+            try:
+                retrieved_memory = await self._memory.retrieve(
+                    retrieve_text,
+                    top_k=self._memory_retrieval_k,
+                )
+                if isinstance(retrieved_memory, list):
+                    memory_hits = retrieved_memory
+            except Exception as exc:
+                # Context retrieval is advisory; an unavailable memory service
+                # must not prevent System0 from making its triage decision.
+                record_event(
+                    "cognition_memory_retrieval_error",
+                    {"turn_id": turn_id, "trace_id": trace_id, "error": str(exc)},
+                )
+        context_packet["semantic_summary"] = semantic_summary
+        self._recovery_state(trace_id)['query'] = contextual_query(
+            retrieve_text, {'summary': semantic_summary or context_packet.get('summary', '')})
+        memory_hits.extend(self._reviewed_learning_facts(text))
+        context_packet["memory"] = memory_hits
+        if isinstance(turn_id, str) and turn_id:
+            self._turn_context_packet[turn_id] = dict(context_packet)
+
+        if (
+            isinstance(text, str)
+            and self._cognition_system0_enabled
+            and not configured_force_system
+            and forced_execution_mode is None
+        ):
+            system0_thinking_trace.append(
+                {
+                    "phase": "system0_gate",
+                    "thinking_mode": "system0",
+                    "reason": "mandatory first-pass triage",
+                }
+            )
+            parsed_system0 = await self._call_cognition_json(
+                self._build_cognition_system0_prompt(
+                    text,
+                    context_packet,
+                ),
+                self._build_cognition_system0_schema(),
+                self._parse_cognition_system0_response,
+                "system0_gate",
+                trace_id,
+                turn_id,
+                model_override=self._resolve_cognition_model_override("system0"),
+                options_override=self._cognition_system0_options or None,
+            )
+            if parsed_system0 is not None:
+                decision = str(parsed_system0.get("type") or "").strip().lower()
+                system0_thinking_trace.append(
+                    {
+                        "phase": "system0_gate",
+                        "thinking_mode": "system0",
+                        "type": decision,
+                        "thought": parsed_system0.get("thought", ""),
+                        "reason": parsed_system0.get("reason", ""),
+                        "actions": [],
+                    }
+                )
+                if decision == "final":
+                    system0_result_payload = {
+                        "type": "final",
+                        "text": parsed_system0.get("text", ""),
+                    }
+            else:
+                system0_thinking_trace.append(
+                    {
+                        "phase": "system0_gate",
+                        "thinking_mode": "system0",
+                        "reason": "invalid or unavailable decision; escalating",
+                    }
+                )
+
+        retrieved_tools = (
+            []
+            if system0_result_payload is not None
+            else await self._retrieve_relevant_tools(
+                contextual_query(retrieve_text, {'summary': semantic_summary or context_packet.get('summary', '')}),
+                self._tool_retrieval_k)
+        )
         selection_candidates = (
+            []
+            if system0_result_payload is not None
+            else
             self._tools.list_active()
             if self._select_relevant_tools_enabled and self._tool_selection_independent_from_retrieval
             else retrieved_tools
         )
-        selected_tools, tool_selection_trace = await self._select_relevant_tools(
-            text,
-            context_packet,
-            memory_hits,
-            selection_candidates,
-            trace_id,
-            turn_id,
+        selected_tools, tool_selection_trace = (
+            ([], None)
+            if system0_result_payload is not None
+            else await self._select_relevant_tools(
+                text,
+                context_packet,
+                memory_hits,
+                selection_candidates,
+                trace_id,
+                turn_id,
+            )
         )
         tools = retrieved_tools
         if self._select_relevant_tools_enabled:
@@ -8138,15 +8642,15 @@ class Orchestrator:
             and tool_selection_trace.get("status") == "selected"
             and bool(tools)
         )
-        skills = self._load_cognition_skills()
-        patterns = self._load_cognition_patterns()
+        skills = [] if system0_result_payload is not None else self._load_cognition_skills()
+        patterns = [] if system0_result_payload is not None else self._load_cognition_patterns()
         callable_patterns = self._cognition_source_patterns(patterns)
-        safety_rules = self._load_cognition_safety_rules()
+        safety_rules = [] if system0_result_payload is not None else self._load_cognition_safety_rules()
 
         query_state = self._default_cognition_query_state(text)
         state_of_mind = self._default_cognition_state_of_mind()
         observations: List[Dict[str, Any]] = []
-        thinking_trace: List[Dict[str, Any]] = []
+        thinking_trace: List[Dict[str, Any]] = list(system0_thinking_trace)
         if tool_selection_trace is not None:
             selection_trace = dict(tool_selection_trace)
             selection_trace["candidate_source"] = (
@@ -8182,12 +8686,33 @@ class Orchestrator:
                 },
             )
         action_budget = self._cognition_action_limit
-        route_mode = "system2"
-        execution_mode = "system2"
+        route_mode = "system0" if system0_result_payload is not None else "system2"
+        execution_mode = "system0" if system0_result_payload is not None else "system2"
         strategy_brief = ""
-        result_payload: Optional[Dict[str, Any]] = None
+        result_payload: Optional[Dict[str, Any]] = system0_result_payload
 
-        if forced_execution_mode in {"system0", "system1", "system2", "system3"}:
+        run = ACTIVE_RUN.get()
+        if resume_state is not None:
+            query_state = resume_state["query_state"]
+            state_of_mind = resume_state["state_of_mind"]
+            observations = resume_state["observations"]
+            thinking_trace = resume_state["thinking_trace"]
+            tools = self._merge_relevant_tool_lists(resume_state["tools"], tools)
+            strategy_brief = resume_state.get("strategy_brief", "")
+            thinking_trace.append({"phase": "continuation", "segment": resume_state["segments"]})
+        if run is not None:
+            run.update(query_state=query_state, state_of_mind=state_of_mind,
+                       observations=observations, thinking_trace=thinking_trace, tools=tools)
+            action_budget = min(action_budget, max(0, run["max_actions"] - run["actions_used"]))
+            run["explicit_result"] = False
+            self._checkpoint_cognition(run)
+
+        if system0_result_payload is None and forced_execution_mode in {
+            "system0",
+            "system1",
+            "system2",
+            "system3",
+        }:
             route_mode = forced_execution_mode
             execution_mode = forced_execution_mode
             thinking_trace.append(
@@ -8203,75 +8728,7 @@ class Orchestrator:
                 {"trace_id": trace_id, "thinking_mode": route_mode, "forced": True, "reason": "requested_mode"},
             )
 
-        _trivial_routing_skip = (
-            forced_execution_mode is None
-            and not self._cognition_force_system
-            and self._cognition_routing_skip_trivial
-            and self._is_trivial_cognition_request(text, tools)
-        )
-
-        if _trivial_routing_skip:
-            execution_mode = self._cognition_trivial_query_target
-            route_mode = execution_mode
-            thinking_trace.append({
-                "phase": "route",
-                "thinking_mode": route_mode,
-                "reason": "trivial turn skipped init and router",
-            })
-            self._log_mode_event(
-                "COGNITION",
-                "thinking_route",
-                {"trace_id": trace_id, "thinking_mode": route_mode, "forced": True, "reason": "trivial_turn"},
-            )
-
-        if forced_execution_mode is None and not _trivial_routing_skip and (
-            self._cognition_query_state_enabled or self._cognition_state_of_mind_enabled
-        ):
-            parsed_init = await self._call_cognition_json(
-                self._build_cognition_init_prompt(text, context_packet, memory_hits, tools),
-                self._build_cognition_init_schema(),
-                self._parse_cognition_init_response,
-                "init",
-                trace_id,
-                turn_id,
-                model_override=self._cognition_init_model,
-                options_override=self._cognition_init_options or None,
-            )
-            if parsed_init is not None:
-                init_qs = parsed_init.get("query_state", {})
-                # Validate that the init call populated an intent before merging.
-                # An empty intent is a sign the init call hallucinated or parsed incorrectly.
-                proposed_intent = str(init_qs.get("intent") or "").strip() if isinstance(init_qs, dict) else ""
-                if proposed_intent:
-                    self._merge_cognition_query_state(query_state, init_qs)
-                else:
-                    self._log_mode_event(
-                        "COGNITION",
-                        "init_intent_empty",
-                        {"trace_id": trace_id, "text_preview": text[:80]},
-                    )
-                self._merge_cognition_state_of_mind(state_of_mind, parsed_init.get("state_of_mind", {}))
-                tools_needed = bool(parsed_init.get("tools_needed", True))
-                if (
-                    not tools_needed
-                    and (
-                        self._cognition_init_controls_tools_needed
-                        or not tools_from_selector
-                    )
-                ):
-                    tools = []
-                thinking_trace.append(
-                    {
-                        "phase": "init",
-                        "tools_needed": tools_needed,
-                        "thought": parsed_init.get("thought", ""),
-                        "query_state": dict(query_state),
-                        "state_of_mind": dict(state_of_mind),
-                        "intent_validated": bool(proposed_intent),
-                    }
-                )
-
-        if forced_execution_mode is None and not _trivial_routing_skip and callable_patterns and not self._cognition_force_system:
+        if forced_execution_mode is None and system0_result_payload is None and callable_patterns and not configured_force_system:
             pattern_route_schema = (
                 "{\"type\":\"pattern_route\",\"decision\":\"use\",\"pattern_id\":\"...\",\"reason\":\"...\"}\n"
                 "{\"type\":\"pattern_route\",\"decision\":\"route\",\"reason\":\"...\"}"
@@ -8369,12 +8826,10 @@ class Orchestrator:
                             action_budget = _pre_pattern_budget
 
         if result_payload is None:
-            if _trivial_routing_skip:
+            if forced_execution_mode is not None:
                 pass
-            elif forced_execution_mode is not None:
-                pass
-            elif self._cognition_force_system:
-                route_mode = self._cognition_force_system
+            elif configured_force_system:
+                route_mode = configured_force_system
                 execution_mode = route_mode
                 thinking_trace.append(
                     {
@@ -8405,10 +8860,12 @@ class Orchestrator:
                 )
                 parsed_route = await self._call_cognition_json(
                     self._build_cognition_route_prompt(
+                        text,
                         query_state,
                         state_of_mind,
                         memory_hits,
                         tools,
+                        semantic_summary=semantic_summary,
                     ),
                     route_schema,
                     self._parse_cognition_route_response,
@@ -8513,7 +8970,7 @@ class Orchestrator:
                         "reason": "system3 forced or selected, but proposer/critic pools are unavailable",
                     }
                 )
-                if self._cognition_force_system == "system3":
+                if configured_force_system == "system3" or forced_execution_mode == "system3":
                     result_payload = {
                         "type": "final",
                         "text": (
@@ -8556,7 +9013,7 @@ class Orchestrator:
                         "scores": system3_result.get("scores", {}),
                     }
                 )
-            elif result_payload is None and self._cognition_force_system == "system3":
+            elif result_payload is None and (configured_force_system == "system3" or forced_execution_mode == "system3"):
                 result_payload = {
                     "type": "final",
                     "text": "System3 is forced but produced no valid winning strategy.",
@@ -8578,19 +9035,21 @@ class Orchestrator:
                     }
                 )
 
+        if run is not None:
+            run.update(query_state=query_state, state_of_mind=state_of_mind,
+                       strategy_brief=strategy_brief)
+
         system_schemas = self._build_cognition_system_schemas()
 
-        if execution_mode == "system0":
+        if execution_mode == "system0" and result_payload is None:
             for cycle_index in range(1, self._cognition_system0_max_steps + 1):
                 parsed_system0 = await self._call_cognition_json(
                     self._build_cognition_system0_prompt(
-                        query_state,
-                        state_of_mind,
-                        observations,
-                        cycle_index,
+                        text,
+                        context_packet,
                     ),
-                    system_schemas["final"],
-                    self._parse_cognition_final_response,
+                    self._build_cognition_system0_schema(),
+                    self._parse_cognition_system0_response,
                     f"system0_{cycle_index}",
                     trace_id,
                     turn_id,
@@ -8599,17 +9058,18 @@ class Orchestrator:
                 )
                 if parsed_system0 is None:
                     break
-                self._merge_cognition_query_state(query_state, parsed_system0.get("query_state_delta", {}))
-                self._merge_cognition_state_of_mind(state_of_mind, parsed_system0.get("state_of_mind_delta", {}))
+                decision = str(parsed_system0.get("type") or "").strip().lower()
                 thinking_trace.append(
                     {
                         "phase": f"system0_{cycle_index}",
                         "thought": parsed_system0.get("thought", ""),
-                        "type": "final",
+                        "type": decision,
+                        "reason": parsed_system0.get("reason", ""),
                         "actions": [],
                     }
                 )
-                result_payload = {"type": "final", "text": parsed_system0.get("text", "")}
+                if decision == "final":
+                    result_payload = {"type": "final", "text": parsed_system0.get("text", "")}
                 break
 
         if execution_mode == "system1" and result_payload is None:
@@ -8622,6 +9082,7 @@ class Orchestrator:
                         tools,
                         cycle_index,
                         strategy_brief,
+                        text,
                     ),
                     self._build_cognition_execution_schema_text(
                         allow_step=False,
@@ -8660,12 +9121,62 @@ class Orchestrator:
                 if action_budget <= 0 or not planned_actions:
                     break
                 executed = await self._run_cognition_actions(planned_actions, trace_id, action_budget, tools=tools)
-                observations.extend(executed)
+                observations.extend(item for item in executed if not item.get("evidence_id") or item["evidence_id"] not in {obs.get("evidence_id") for obs in observations})
+                self._checkpoint_cognition()
                 action_budget = max(0, action_budget - len(executed))
                 if not executed:
                     break
 
+        if execution_mode == "system1" and result_payload is None and forced_execution_mode != "system1" and configured_force_system != "system1":
+            execution_mode = "system2"
+            thinking_trace.append({"phase": "escalation", "from": "system1", "to": "system2",
+                                   "reason": "System1 did not complete the task"})
+
         if execution_mode == "system2" and result_payload is None:
+            if resume_state is None and (self._cognition_query_state_enabled or self._cognition_state_of_mind_enabled):
+                parsed_init = await self._call_cognition_json(
+                    self._build_cognition_init_prompt(text, context_packet, memory_hits, tools),
+                    self._build_cognition_init_schema(),
+                    self._parse_cognition_init_response,
+                    "init",
+                    trace_id,
+                    turn_id,
+                    model_override=self._cognition_init_model,
+                    options_override=self._cognition_init_options or None,
+                )
+                if parsed_init is not None:
+                    init_qs = parsed_init.get("query_state", {})
+                    # Validate that the init call populated an intent before merging.
+                    # An empty intent is a sign the init call hallucinated or parsed incorrectly.
+                    proposed_intent = str(init_qs.get("intent") or "").strip() if isinstance(init_qs, dict) else ""
+                    if proposed_intent:
+                        self._merge_cognition_query_state(query_state, init_qs)
+                    else:
+                        self._log_mode_event(
+                            "COGNITION",
+                            "init_intent_empty",
+                            {"trace_id": trace_id, "text_preview": text[:80]},
+                        )
+                    self._merge_cognition_state_of_mind(state_of_mind, parsed_init.get("state_of_mind", {}))
+                    tools_needed = bool(parsed_init.get("tools_needed", True))
+                    if (
+                        not tools_needed
+                        and (
+                            self._cognition_init_controls_tools_needed
+                            or not tools_from_selector
+                        )
+                    ):
+                        tools = []
+                    thinking_trace.append(
+                        {
+                            "phase": "init",
+                            "tools_needed": tools_needed,
+                            "thought": parsed_init.get("thought", ""),
+                            "query_state": dict(query_state),
+                            "state_of_mind": dict(state_of_mind),
+                            "intent_validated": bool(proposed_intent),
+                        }
+                    )
             for cycle_index in range(1, self._cognition_system2_max_steps + 1):
                 parsed_step = await self._call_cognition_json(
                     self._build_cognition_system2_prompt(
@@ -8673,9 +9184,10 @@ class Orchestrator:
                         state_of_mind,
                         observations,
                         thinking_trace,
-                        tools,
-                        cycle_index,
-                        strategy_brief,
+                        tools=tools,
+                        cycle_index=cycle_index,
+                        strategy_brief=strategy_brief,
+                        user_text=text,
                     ),
                     self._build_cognition_execution_schema_text(
                         allow_step=True,
@@ -8730,8 +9242,18 @@ class Orchestrator:
                         action_budget,
                         tools=tools,
                     )
-                    observations.extend(executed)
+                    observations.extend(item for item in executed if not item.get("evidence_id") or item["evidence_id"] not in {obs.get("evidence_id") for obs in observations})
+                    self._checkpoint_cognition()
                     action_budget = max(0, action_budget - len(executed))
+
+        if run is not None:
+            run["explicit_result"] = result_payload is not None
+            run["result_type"] = (result_payload or {}).get("type", "final")
+            run["execution_mode"] = execution_mode
+            run["route_mode"] = route_mode
+            run["stop_reason"] = ("result" if result_payload is not None else
+                                  "action_budget" if action_budget == 0 else "step_budget_or_invalid_output")
+            self._checkpoint_cognition(run)
 
         # Detect budget exhaustion before finalize so we can signal it downstream.
         _budget_was_exhausted = result_payload is None and action_budget == 0
@@ -8752,54 +9274,11 @@ class Orchestrator:
                 thinking_trace,
                 trace_id,
                 turn_id,
+                user_text=text,
             )
 
         distillation: Dict[str, Any] = {}
-        persisted_counts = {
-            "skills": 0,
-            "facts": 0,
-            "patterns": 0,
-            "lessons": 0,
-            "safety_rules": 0,
-        }
-        # Skip distillation for:
-        # 1. Successful pattern executions — the pattern already encodes the knowledge.
-        # 2. Trivial turns (too short and no observations) — nothing meaningful to learn.
-        _pattern_success = route_mode == "pattern" and result_payload.get("type") == "final"
-        _trivial_turn = (
-            self._cognition_distill_skip_trivial
-            and self._is_trivial_cognition_request(text)
-            and not observations
-        )
-        if skip_distillation or _pattern_success or _trivial_turn:
-            self._log_mode_event(
-                "COGNITION",
-                "distill_skipped",
-                {
-                    "trace_id": trace_id,
-                    "reason": (
-                        "skip_distillation"
-                        if skip_distillation
-                        else "pattern_success"
-                        if _pattern_success
-                        else "trivial_turn"
-                    ),
-                },
-            )
-        else:
-            distillation = await self._distill_cognition_episode(
-                result_payload,
-                query_state,
-                state_of_mind,
-                observations,
-                thinking_trace,
-                tools,
-                patterns,
-                trace_id,
-                turn_id,
-                budget_exhausted=_budget_was_exhausted,
-            )
-            persisted_counts = await self._persist_cognition_distillation(distillation, trace_id)
+        persisted_counts = {"skills": 0, "facts": 0, "patterns": 0, "lessons": 0, "safety_rules": 0}
         try:
             append_jsonl(
                 self._cognition_episodes_path,
@@ -8925,7 +9404,7 @@ class Orchestrator:
             return None
         return result.get("token")
 
-    async def _call_tool(
+    async def _call_tool_unjournaled(
         self,
         tool_id: str,
         args: Dict[str, Any],
@@ -8934,6 +9413,12 @@ class Orchestrator:
         required_artifacts: List[str],
     ) -> Dict[str, Any]:
         tool_def = self._tools.get_tool(tool_id) or {"tool_id": tool_id}
+        autonomy = _CURRENT_AUTONOMY.get()
+        if autonomy is not None:
+            decision = self._policy.evaluate_tool(tool_def, args)
+            if autonomy["remaining"] <= 0 or (autonomy["permission_policy"] != "approve" and decision.status != "ALLOW"):
+                return {"status": "DENIED", "error": "Autonomy execution limit or permission policy"}
+            autonomy["remaining"] -= 1
         req = {
             "request_id": new_id(),
             "tool_id": tool_id,
@@ -8977,7 +9462,11 @@ class Orchestrator:
                     "logs_ref": None,
                 },
             )
-            return {"status": "ERROR", "error": str(e)}
+            failure = {"status": "ERROR", "error": str(e)}
+            if autonomy is not None:
+                autonomy["evidence"].append({"request_id": req["request_id"], "trace_id": trace_id,
+                    "tool_id": tool_id, **failure})
+            return failure
         record_event(
             "tool_response",
             {
@@ -9016,7 +9505,11 @@ class Orchestrator:
                         "logs_ref": None,
                     },
                 )
-                return {"status": "ERROR", "error": str(e)}
+                failure = {"status": "ERROR", "error": str(e)}
+                if autonomy is not None:
+                    autonomy["evidence"].append({"request_id": req["request_id"], "trace_id": trace_id,
+                        "tool_id": tool_id, **failure})
+                return failure
             record_event(
                 "tool_response",
                 {
@@ -9029,6 +9522,13 @@ class Orchestrator:
                     "logs_ref": resp.get("logs_ref"),
                 },
             )
+        if autonomy is not None:
+            autonomy["evidence"].append({
+                "request_id": req["request_id"], "trace_id": trace_id, "tool_id": tool_id,
+                "args": redact_tool_payload(tool_def, "args", args), "status": resp.get("status"),
+                "result": redact_tool_payload(tool_def, "result", resp.get("result")),
+                "error": resp.get("error"), "logs_ref": resp.get("logs_ref"),
+            })
         return resp
 
 

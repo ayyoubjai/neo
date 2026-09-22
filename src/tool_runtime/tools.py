@@ -18,20 +18,10 @@ import zipfile
 from typing import Any, Dict, List, Tuple
 
 from common.config import load_settings
+from common.tool_recovery import failure_details
 from common.tool_metadata import merge_runtime_tool_metadata
 from common.time_utils import utc_now_iso
 from common.vision_broker import load_vision_broker_manifest_for_settings, workspace_ref_for_path
-from embodiment.adapters import (
-    AdbPhoneAdapter,
-    CameraAdapterError,
-    DesktopAdapter,
-    DesktopAdapterError,
-    OpenCvCameraAdapter,
-    PhoneAdapterError,
-    RobotAdapterError,
-    RosCliRobotAdapter,
-)
-from embodiment.manager import EmbodimentManager
 from integrations.google_workspace import GoogleAuthError, GoogleWorkspaceManager
 from model_server.frame_sequence import (
     aggregate_objects as aggregate_frame_objects,
@@ -44,12 +34,14 @@ from model_server.video_model import analyze as analyze_video
 from model_server.vision_model import analyze
 from model_server.uground_model import predict as uground_predict
 from tool_runtime.sandbox import resolve_workspace_path, SandboxViolation
+from tool_runtime.desktop import capture_screen, is_wayland, load_input_backend
 
 
 class ToolError(Exception):
-    def __init__(self, message: str, io: Dict[str, Any] = None):
+    def __init__(self, message: str, io: Dict[str, Any] = None, *, code: str = 'UNKNOWN', missing_argument: str = None):
         super().__init__(message)
         self.io = io or {}
+        self.details = failure_details(code, missing_argument=missing_argument)
 
 
 def sys_time(_: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -870,11 +862,17 @@ def math_sympy(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any
 
 
 
-def _net_search_searxng(query: str, max_results: int, base_url: str, timeout_s: int) -> List[Dict[str, Any]]:
+def _net_search_searxng(
+    query: str,
+    max_results: int,
+    base_url: str,
+    timeout_s: int,
+    safe_search: int = 1,
+) -> List[Dict[str, Any]]:
     params = {
         "q": query,
         "format": "json",
-        "safesearch": 0,
+        "safesearch": safe_search,
     }
     url = base_url.rstrip("/") + "/search?" + urllib.parse.urlencode(params)
     try:
@@ -886,6 +884,15 @@ def _net_search_searxng(query: str, max_results: int, base_url: str, timeout_s: 
         data = json.loads(body)
     except json.JSONDecodeError:
         raise ToolError("Invalid search response")
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        raise ToolError("Invalid search response: expected a results list")
+    if not data["results"] and data.get("unresponsive_engines"):
+        failures = json.dumps(data["unresponsive_engines"], ensure_ascii=True)
+        raise ToolError(
+            "SearXNG returned no results and reported engine failures: "
+            + failures[:2000]
+            + ". Check SearXNG outbound connectivity and engine health; changing the query may not help."
+        )
     results: List[Dict[str, Any]] = []
     for item in data.get("results", []):
         if not isinstance(item, dict):
@@ -918,7 +925,18 @@ def net_search(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any
     if not base_url:
         raise ToolError("Missing search.searxng_url in settings")
     timeout_s = int(settings.search.get("timeout_s", 20))
-    results = _net_search_searxng(query, max_results, base_url, timeout_s)
+    try:
+        safe_search = int(settings.search.get("safe_search", 1))
+    except (TypeError, ValueError):
+        safe_search = 1
+    safe_search = max(0, min(safe_search, 2))
+    results = _net_search_searxng(
+        query,
+        max_results,
+        base_url,
+        timeout_s,
+        safe_search,
+    )
     return {"query": query, "results": results, "provider": provider}, {}
 
 
@@ -1341,30 +1359,285 @@ def proc_exec(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any]
         for key, value in raw_env.items():
             env[str(key)] = str(value)
 
+    from tool_runtime.processes import run_process
     try:
-        result = _run_subprocess(command, cwd=cwd, timeout_s=timeout_s, stdin=stdin, env=env)
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
-        timed_out = False
-        returncode = int(result.returncode)
-    except subprocess.TimeoutExpired as e:
-        stdout = e.stdout if isinstance(e.stdout, str) else (e.stdout or b"").decode("utf-8", errors="replace")
-        stderr = e.stderr if isinstance(e.stderr, str) else (e.stderr or b"").decode("utf-8", errors="replace")
-        timed_out = True
-        returncode = -1
+        result = run_process(command, cwd=cwd, timeout_s=timeout_s, stdin=stdin,
+                             env=env, max_output_chars=max_output_chars)
+    except OSError as exc:
+        raise ToolError(f"Process launch failed: {exc}") from exc
+    return {"command": command, "cwd": cwd_arg, **result}, {}
 
-    stdout_truncated = len(stdout) > max_output_chars
-    stderr_truncated = len(stderr) > max_output_chars
+
+def _load_computer_control_backend() -> Any:
+    try:
+        return load_input_backend()
+    except Exception as exc:
+        raise ToolError(str(exc), code=getattr(exc, 'code', 'UNKNOWN')) from exc
+
+
+def computer_screenshot(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    prepare_input = args.get('prepare_input', False)
+    if not isinstance(prepare_input, bool):
+        raise ToolError('prepare_input must be a boolean', code='MISSING_INPUT')
+    if prepare_input and is_wayland():
+        try:
+            _load_computer_control_backend().prepare()
+        except Exception as exc:
+            raise ToolError(str(exc), code=getattr(exc, 'code', 'UNKNOWN')) from exc
+    region = args.get("region")
+    screenshot_region = None
+    if region is not None:
+        if not isinstance(region, dict):
+            raise ToolError("region must be an object")
+        try:
+            x = int(region["x"])
+            y = int(region["y"])
+            width = int(region["width"])
+            height = int(region["height"])
+        except (KeyError, TypeError, ValueError):
+            raise ToolError("region requires integer x, y, width, and height")
+        if width <= 0 or height <= 0:
+            raise ToolError("region width and height must be > 0")
+        screenshot_region = (x, y, width, height)
+
+    ts = int(time.time() * 1000)
+    workspace_path, abs_path = _resolve_output_workspace_path(
+        workspace_root,
+        args.get("path"),
+        f"workspace:/screenshots/computer_{ts}.png",
+    )
+    try:
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        image = capture_screen(region=screenshot_region)
+        try:
+            image.save(abs_path)
+        finally:
+            image.close()
+    except Exception as exc:
+        raise ToolError(f"Unable to capture the screen: {exc}",
+                        code='PERMISSION_DENIED' if isinstance(exc, PermissionError) else getattr(exc, 'code', 'UNKNOWN')) from exc
     return {
-        "command": command,
-        "cwd": cwd_arg,
-        "returncode": returncode,
-        "timed_out": timed_out,
-        "stdout": _truncate_text(stdout, max_output_chars),
-        "stderr": _truncate_text(stderr, max_output_chars),
-        "stdout_truncated": stdout_truncated,
-        "stderr_truncated": stderr_truncated,
+        "image_ref": workspace_path,
+        "width": int(getattr(image, "width", 0)),
+        "height": int(getattr(image, "height", 0)),
     }, {}
+
+
+def computer_click(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    pyautogui = _load_computer_control_backend()
+    try:
+        x = int(args["x"])
+        y = int(args["y"])
+        clicks = int(args.get("clicks", 1))
+        interval = float(args.get("interval", 0.0))
+    except (KeyError, TypeError, ValueError):
+        raise ToolError("x and y are required integers; clicks and interval must be numeric")
+    if clicks < 1:
+        raise ToolError("clicks must be >= 1")
+    button = args.get("button", "left")
+    if not isinstance(button, str) or not button:
+        raise ToolError("button must be a non-empty string")
+    try:
+        pyautogui.click(x=x, y=y, clicks=clicks, interval=interval, button=button)
+    except Exception as exc:
+        raise ToolError(f"Unable to click the screen: {exc}", code=getattr(exc, 'code', 'UNKNOWN')) from exc
+    return {"x": x, "y": y, "button": button, "clicks": clicks}, {}
+
+
+def computer_move(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    pyautogui = _load_computer_control_backend()
+    try:
+        x = int(args["x"])
+        y = int(args["y"])
+        duration = float(args.get("duration", 0.0))
+    except (KeyError, TypeError, ValueError):
+        raise ToolError("x and y are required integers; duration must be numeric")
+    try:
+        pyautogui.moveTo(x=x, y=y, duration=duration)
+    except Exception as exc:
+        raise ToolError(f"Unable to move the pointer: {exc}", code=getattr(exc, 'code', 'UNKNOWN')) from exc
+    return {"x": x, "y": y, "duration": duration}, {}
+
+
+def computer_drag(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    pyautogui = _load_computer_control_backend()
+    start = args.get("start")
+    end = args.get("end")
+    if not isinstance(start, dict) or not isinstance(end, dict):
+        raise ToolError("start and end are required objects")
+    try:
+        start_x = int(start["x"])
+        start_y = int(start["y"])
+        end_x = int(end["x"])
+        end_y = int(end["y"])
+        duration = float(args.get("duration", 0.0))
+    except (KeyError, TypeError, ValueError):
+        raise ToolError("start/end require integer x and y; duration must be numeric")
+    button = args.get("button", "left")
+    if not isinstance(button, str) or not button:
+        raise ToolError("button must be a non-empty string")
+    try:
+        pyautogui.moveTo(start_x, start_y)
+        pyautogui.dragTo(end_x, end_y, duration=duration, button=button)
+    except Exception as exc:
+        raise ToolError(f"Unable to drag the pointer: {exc}", code=getattr(exc, 'code', 'UNKNOWN')) from exc
+    return {
+        "start": {"x": start_x, "y": start_y},
+        "end": {"x": end_x, "y": end_y},
+        "button": button,
+        "duration": duration,
+    }, {}
+
+
+def computer_type(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    pyautogui = _load_computer_control_backend()
+    text = args.get("text")
+    if not isinstance(text, str) or not text:
+        raise ToolError("text is required")
+    try:
+        pyautogui.write(text, interval=float(args.get("interval", 0.0)))
+    except Exception as exc:
+        raise ToolError(f"Unable to type into the active window: {exc}", code=getattr(exc, 'code', 'UNKNOWN')) from exc
+    return {"character_count": len(text)}, {}
+
+
+def computer_hotkey(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    pyautogui = _load_computer_control_backend()
+    keys = args.get("keys")
+    if not isinstance(keys, list) or not keys or any(not isinstance(key, str) or not key for key in keys):
+        raise ToolError("keys must be a non-empty list of strings")
+    try:
+        pyautogui.hotkey(*keys)
+    except Exception as exc:
+        raise ToolError(f"Unable to press the hotkey: {exc}", code=getattr(exc, 'code', 'UNKNOWN')) from exc
+    return {"keys": keys}, {}
+
+
+def computer_scroll(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    pyautogui = _load_computer_control_backend()
+    try:
+        amount = int(args["amount"])
+    except (KeyError, TypeError, ValueError):
+        raise ToolError("amount is required and must be an integer")
+    try:
+        pyautogui.scroll(amount)
+    except Exception as exc:
+        raise ToolError(f"Unable to scroll the active window: {exc}", code=getattr(exc, 'code', 'UNKNOWN')) from exc
+    return {"amount": amount}, {}
+
+
+def computer_focus_window(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    title = args.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise ToolError("title is required")
+    title = title.strip()
+    if is_wayland():
+        raise ToolError(
+            "Focusing arbitrary windows by title requires an X11 session on Linux; "
+            "Wayland does not expose a portable window-activation API.", code='UNSUPPORTED_PLATFORM'
+        )
+    backend_error = None
+    try:
+        import pygetwindow
+    except ToolError:
+        raise
+    except Exception as exc:
+        pygetwindow = None
+        backend_error = exc
+    if pygetwindow is not None:
+        try:
+            windows = pygetwindow.getWindowsWithTitle(title)
+            if not windows:
+                raise ToolError(f"No window found matching: {title}")
+            window = windows[0]
+            if bool(getattr(window, "isMinimized", False)):
+                window.restore()
+            window.activate()
+            return {"title": str(getattr(window, "title", title)), "match_count": len(windows)}, {}
+        except ToolError:
+            raise
+        except Exception as exc:
+            backend_error = exc
+
+    if os.name != "nt":
+        try:
+            result = _run_subprocess(
+                ["xdotool", "search", "--name", title],
+                cwd=workspace_root,
+                timeout_s=10,
+            )
+            window_ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            if result.returncode == 0 and window_ids:
+                activation = _run_subprocess(
+                    ["xdotool", "windowactivate", "--sync", window_ids[0]],
+                    cwd=workspace_root,
+                    timeout_s=10,
+                )
+                if activation.returncode == 0:
+                    return {"title": title, "match_count": len(window_ids)}, {}
+                backend_error = activation.stderr or "xdotool activation failed"
+        except (ToolError, OSError, subprocess.SubprocessError) as exc:
+            backend_error = exc
+
+        try:
+            result = _run_subprocess(
+                ["wmctrl", "-l"],
+                cwd=workspace_root,
+                timeout_s=10,
+            )
+            matches = []
+            for line in result.stdout.splitlines():
+                parts = line.split(None, 3)
+                if len(parts) == 4 and title.lower() in parts[3].lower():
+                    matches.append(parts[0])
+            if result.returncode == 0 and matches:
+                activation = _run_subprocess(["wmctrl", "-ia", matches[0]], cwd=workspace_root, timeout_s=10)
+                if activation.returncode == 0:
+                    return {"title": title, "match_count": len(matches)}, {}
+                backend_error = activation.stderr or "wmctrl activation failed"
+        except (ToolError, OSError, subprocess.SubprocessError) as exc:
+            backend_error = exc
+
+    detail = f" ({backend_error})" if backend_error else ""
+    raise ToolError(
+        "Unable to focus a window. Install pygetwindow on Windows or "
+        f"xdotool/wmctrl on Linux{detail}"
+    )
+
+
+def computer_launch_application(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    command = args.get("command")
+    if not isinstance(command, list) or not command or any(not isinstance(item, str) or not item for item in command):
+        raise ToolError("command must be a non-empty list of strings")
+    args = _normalize_workspace_args(args, workspace_root, ["cwd"])
+    cwd_arg = args.get("cwd", "workspace:/")
+    try:
+        cwd = resolve_workspace_path(workspace_root, cwd_arg)
+    except SandboxViolation as exc:
+        raise ToolError(str(exc))
+    if not os.path.isdir(cwd):
+        raise ToolError("cwd must be a directory")
+    env = os.environ.copy()
+    raw_env = args.get("env")
+    if raw_env is not None:
+        if not isinstance(raw_env, dict):
+            raise ToolError("env must be an object")
+        env.update({str(key): str(value) for key, value in raw_env.items()})
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise ToolError(f"Application not found: {exc.filename or command[0]}") from exc
+    except OSError as exc:
+        raise ToolError(f"Unable to launch application: {exc}") from exc
+    return {"command": command, "cwd": cwd_arg, "pid": int(process.pid)}, {}
 
 
 def image_analyse(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -1373,7 +1646,7 @@ def image_analyse(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, 
     if question is not None and not isinstance(question, str):
         question = str(question)
     if not isinstance(image_ref, str) or not image_ref:
-        raise ToolError("image_ref is required")
+        raise ToolError("image_ref is required", code='MISSING_INPUT', missing_argument='image_ref')
     if image_ref.startswith("file:"):
         abs_path = image_ref[len("file:") :]
         if not abs_path:
@@ -1383,9 +1656,12 @@ def image_analyse(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, 
     elif not image_ref.startswith("workspace:/"):
         image_ref = f"workspace:/{image_ref.lstrip('/')}"
     try:
-        resolve_workspace_path(workspace_root, image_ref)
+        image_path = resolve_workspace_path(workspace_root, image_ref)
     except SandboxViolation as e:
-        raise ToolError(str(e))
+        raise ToolError(str(e), code='PERMISSION_DENIED')
+    if not os.path.isfile(image_path):
+        raise ToolError('Image file not found. Use an existing image_ref returned by a producer or supplied by the user.',
+                        code='MISSING_INPUT', missing_argument='image_ref')
     result = analyze(image_ref, question=question if question else None)
     if isinstance(result, dict) and result.get("ok") is False:
         error = result.get("error")
@@ -1394,7 +1670,7 @@ def image_analyse(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, 
         if isinstance(raw_output, str) and raw_output:
             err_io["raw_output"] = raw_output
         if isinstance(error, str) and error:
-            raise ToolError(error, io=err_io)
+            raise ToolError(error, io=err_io, code=result.get('error_code', 'UNKNOWN'))
         raise ToolError("Image analysis failed", io=err_io)
 
     io: Dict[str, Any] = {}
@@ -1804,7 +2080,7 @@ def vision_observe(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str,
 
     manifest = load_vision_broker_manifest_for_settings(settings)
     if not manifest:
-        raise ToolError("Live vision broker manifest is unavailable. Start the local vision sense first.")
+        raise ToolError("Camera broker unavailable. Start the camera sense for camera observations; use computer.screenshot for the desktop.", code='UNAVAILABLE_SOURCE')
 
     candidate_frames = _vision_candidate_frames_from_manifest(
         manifest,
@@ -1826,7 +2102,7 @@ def vision_observe(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str,
             if _vision_watch_ready(candidate_frames):
                 break
     if not candidate_frames:
-        raise ToolError("No broker frames were available for the requested time scope")
+        raise ToolError("No camera broker frames were available. This tool does not capture the desktop.", code='UNAVAILABLE_SOURCE')
 
     analysis_mode = requested_analysis_mode
     if analysis_mode == "auto":
@@ -1963,297 +2239,6 @@ def ui_predict_coords(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[s
     return result, io
 
 
-def ui_screenshot(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    region = args.get("region")
-    if region and isinstance(region, dict):
-        x = int(region.get("x", 0))
-        y = int(region.get("y", 0))
-        width = int(region.get("width", 0))
-        height = int(region.get("height", 0))
-        if width <= 0 or height <= 0:
-            raise ToolError("region.width and region.height must be > 0")
-        bbox = (x, y, width, height)
-    else:
-        bbox = None
-
-    ts = int(time.time() * 1000)
-    workspace_path, abs_path = _resolve_output_workspace_path(
-        workspace_root,
-        args.get("path"),
-        f"workspace:/screenshots/screenshot_{ts}.png",
-    )
-    try:
-        result = DesktopAdapter().capture_screen(abs_path, region=bbox)
-    except DesktopAdapterError as e:
-        raise ToolError(str(e))
-    return {"image_ref": workspace_path, "width": result["width"], "height": result["height"]}, {}
-
-
-def ui_click(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    x = args.get("x")
-    y = args.get("y")
-    if x is None or y is None:
-        raise ToolError("x and y are required")
-    button = args.get("button", "left")
-    clicks = int(args.get("clicks", 1))
-    interval = float(args.get("interval", 0.0))
-    try:
-        return DesktopAdapter().click(int(x), int(y), button=button, clicks=clicks, interval=interval), {}
-    except DesktopAdapterError as e:
-        raise ToolError(str(e))
-
-
-def ui_move(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    x = args.get("x")
-    y = args.get("y")
-    if x is None or y is None:
-        raise ToolError("x and y are required")
-    duration = float(args.get("duration", 0.0))
-    try:
-        return DesktopAdapter().move(int(x), int(y), duration=duration), {}
-    except DesktopAdapterError as e:
-        raise ToolError(str(e))
-
-
-def ui_drag(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    start = args.get("start")
-    end = args.get("end")
-    if not isinstance(start, dict) or not isinstance(end, dict):
-        raise ToolError("start and end are required objects")
-    duration = float(args.get("duration", 0.0))
-    button = args.get("button", "left")
-    try:
-        return DesktopAdapter().drag(start, end, duration=duration, button=button), {}
-    except DesktopAdapterError as e:
-        raise ToolError(str(e))
-
-
-def ui_type(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    text = args.get("text", "")
-    if not isinstance(text, str) or not text:
-        raise ToolError("text is required")
-    interval = float(args.get("interval", 0.0))
-    try:
-        return DesktopAdapter().type_text(text, interval=interval), {}
-    except DesktopAdapterError as e:
-        raise ToolError(str(e))
-
-
-def ui_hotkey(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    keys = args.get("keys")
-    if not isinstance(keys, list) or not keys:
-        raise ToolError("keys must be a non-empty list")
-    try:
-        return DesktopAdapter().hotkey(keys), {}
-    except DesktopAdapterError as e:
-        raise ToolError(str(e))
-
-
-def ui_scroll(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    amount = int(args.get("amount", 0))
-    try:
-        return DesktopAdapter().scroll(amount), {}
-    except DesktopAdapterError as e:
-        raise ToolError(str(e))
-
-
-def ui_focus_window(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    title = args.get("title", "")
-    if not isinstance(title, str) or not title:
-        raise ToolError("title is required")
-    try:
-        return DesktopAdapter().focus_window(title), {}
-    except DesktopAdapterError as e:
-        raise ToolError(str(e))
-
-
-def ui_list_applications(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    manager = EmbodimentManager()
-    return manager.list_launchable_applications(), {}
-
-
-def ui_open_application(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    app_id = args.get("app_id", "")
-    if not isinstance(app_id, str) or not app_id.strip():
-        raise ToolError("app_id is required")
-    manager = EmbodimentManager()
-    try:
-        return manager.launch_desktop_application(app_id), {}
-    except DesktopAdapterError as e:
-        raise ToolError(str(e))
-
-
-def embodiment_describe_host(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    manager = EmbodimentManager()
-    return manager.describe_host(), {}
-
-
-def embodiment_list_capabilities(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    manager = EmbodimentManager()
-    return manager.list_capabilities(), {}
-
-
-def embodiment_list_fallbacks(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    manager = EmbodimentManager()
-    return manager.list_fallbacks(), {}
-
-
-def embodiment_get_state(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    manager = EmbodimentManager()
-    return manager.get_state(), {}
-
-
-def embodiment_screen_capture(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    return ui_screenshot(args, workspace_root)
-
-
-def embodiment_pointer_click(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    return ui_click(args, workspace_root)
-
-
-def embodiment_keyboard_type(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    return ui_type(args, workspace_root)
-
-
-def embodiment_window_focus(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    return ui_focus_window(args, workspace_root)
-
-
-def embodiment_camera_capture(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    camera_index = int(args.get("camera_index", 0))
-    width = args.get("width")
-    height = args.get("height")
-    if width is not None:
-        width = int(width)
-    if height is not None:
-        height = int(height)
-    ts = int(time.time() * 1000)
-    workspace_path, abs_path = _resolve_output_workspace_path(
-        workspace_root,
-        args.get("path"),
-        f"workspace:/camera/frame_{ts}.jpg",
-    )
-    try:
-        result = OpenCvCameraAdapter(camera_index=camera_index).capture_frame(
-            abs_path,
-            width=width,
-            height=height,
-        )
-    except CameraAdapterError as e:
-        raise ToolError(str(e))
-    return {
-        "image_ref": workspace_path,
-        "width": result["width"],
-        "height": result["height"],
-        "camera_index": result["camera_index"],
-    }, {}
-
-
-def embodiment_phone_screen_capture(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    serial = args.get("serial")
-    ts = int(time.time() * 1000)
-    workspace_path, abs_path = _resolve_output_workspace_path(
-        workspace_root,
-        args.get("path"),
-        f"workspace:/phone/screenshot_{ts}.png",
-    )
-    try:
-        result = AdbPhoneAdapter(serial=serial).capture_screen(abs_path)
-    except PhoneAdapterError as e:
-        raise ToolError(str(e))
-    return {
-        "image_ref": workspace_path,
-        "width": result["width"],
-        "height": result["height"],
-        "serial": result.get("serial"),
-    }, {}
-
-
-def embodiment_phone_tap(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    x = args.get("x")
-    y = args.get("y")
-    if x is None or y is None:
-        raise ToolError("x and y are required")
-    try:
-        return AdbPhoneAdapter(serial=args.get("serial")).tap(int(x), int(y)), {}
-    except PhoneAdapterError as e:
-        raise ToolError(str(e))
-
-
-def embodiment_phone_swipe(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    start = args.get("start")
-    end = args.get("end")
-    if not isinstance(start, dict) or not isinstance(end, dict):
-        raise ToolError("start and end are required objects")
-    duration_ms = args.get("duration_ms")
-    if duration_ms is not None:
-        duration_ms = int(duration_ms)
-    try:
-        return AdbPhoneAdapter(serial=args.get("serial")).swipe(start, end, duration_ms=duration_ms), {}
-    except PhoneAdapterError as e:
-        raise ToolError(str(e))
-
-
-def embodiment_phone_type(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    text = args.get("text", "")
-    if not isinstance(text, str) or not text:
-        raise ToolError("text is required")
-    try:
-        return AdbPhoneAdapter(serial=args.get("serial")).type_text(text), {}
-    except PhoneAdapterError as e:
-        raise ToolError(str(e))
-
-
-def embodiment_phone_launch_app(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    package = args.get("package", "")
-    activity = args.get("activity")
-    if not isinstance(package, str) or not package:
-        raise ToolError("package is required")
-    if activity is not None and not isinstance(activity, str):
-        raise ToolError("activity must be a string")
-    try:
-        return AdbPhoneAdapter(serial=args.get("serial")).launch_app(package, activity=activity), {}
-    except PhoneAdapterError as e:
-        raise ToolError(str(e))
-
-
-def embodiment_robot_get_state(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    try:
-        return RosCliRobotAdapter().get_state(), {}
-    except RobotAdapterError as e:
-        raise ToolError(str(e))
-
-
-def embodiment_robot_move_joint(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    joint = args.get("joint", "")
-    position = args.get("position")
-    velocity = args.get("velocity")
-    if not isinstance(joint, str) or not joint:
-        raise ToolError("joint is required")
-    if position is None:
-        raise ToolError("position is required")
-    try:
-        return RosCliRobotAdapter().move_joint(joint, float(position), velocity=float(velocity) if velocity is not None else None), {}
-    except RobotAdapterError as e:
-        raise ToolError(str(e))
-
-
-def embodiment_robot_set_gripper(args: Dict[str, Any], workspace_root: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    state = args.get("state", "")
-    width = args.get("width")
-    force = args.get("force")
-    if not isinstance(state, str) or not state:
-        raise ToolError("state is required")
-    try:
-        return RosCliRobotAdapter().set_gripper(
-            state,
-            width=float(width) if width is not None else None,
-            force=float(force) if force is not None else None,
-        ), {}
-    except RobotAdapterError as e:
-        raise ToolError(str(e))
-
-
 def tool_registry() -> Dict[str, Dict[str, Any]]:
     registry = {
         "sys.time": {"fn": sys_time, "tier": 0},
@@ -2278,6 +2263,15 @@ def tool_registry() -> Dict[str, Dict[str, Any]]:
         "video.analyse": {"fn": video_analyse, "tier": 0},
         "vision.observe": {"fn": vision_observe, "tier": 0},
         "ui.predict_coords": {"fn": ui_predict_coords, "tier": 0},
+        "computer.screenshot": {"fn": computer_screenshot, "tier": 2},
+        "computer.click": {"fn": computer_click, "tier": 2},
+        "computer.move": {"fn": computer_move, "tier": 2},
+        "computer.drag": {"fn": computer_drag, "tier": 2},
+        "computer.type": {"fn": computer_type, "tier": 2},
+        "computer.hotkey": {"fn": computer_hotkey, "tier": 2},
+        "computer.scroll": {"fn": computer_scroll, "tier": 2},
+        "computer.focus_window": {"fn": computer_focus_window, "tier": 2},
+        "computer.launch_application": {"fn": computer_launch_application, "tier": 2},
         "net.search": {"fn": net_search, "tier": 1},
         "http.request": {"fn": http_request, "tier": 2},
         "google.status": {"fn": google_status, "tier": 0},
@@ -2296,33 +2290,6 @@ def tool_registry() -> Dict[str, Dict[str, Any]]:
         "git.diff": {"fn": git_diff, "tier": 0},
         "git.log": {"fn": git_log, "tier": 0},
         "proc.exec": {"fn": proc_exec, "tier": 2},
-        "ui.screenshot": {"fn": ui_screenshot, "tier": 2},
-        "ui.click": {"fn": ui_click, "tier": 2},
-        "ui.move": {"fn": ui_move, "tier": 2},
-        "ui.drag": {"fn": ui_drag, "tier": 2},
-        "ui.type": {"fn": ui_type, "tier": 2},
-        "ui.hotkey": {"fn": ui_hotkey, "tier": 2},
-        "ui.scroll": {"fn": ui_scroll, "tier": 2},
-        "ui.focus_window": {"fn": ui_focus_window, "tier": 2},
-        "ui.list_applications": {"fn": ui_list_applications, "tier": 0},
-        "ui.open_application": {"fn": ui_open_application, "tier": 2},
-        "embodiment.describe_host": {"fn": embodiment_describe_host, "tier": 0},
-        "embodiment.list_capabilities": {"fn": embodiment_list_capabilities, "tier": 0},
-        "embodiment.list_fallbacks": {"fn": embodiment_list_fallbacks, "tier": 0},
-        "embodiment.get_state": {"fn": embodiment_get_state, "tier": 0},
-        "embodiment.screen_capture": {"fn": embodiment_screen_capture, "tier": 2},
-        "embodiment.pointer_click": {"fn": embodiment_pointer_click, "tier": 2},
-        "embodiment.keyboard_type": {"fn": embodiment_keyboard_type, "tier": 2},
-        "embodiment.window_focus": {"fn": embodiment_window_focus, "tier": 2},
-        "embodiment.camera_capture": {"fn": embodiment_camera_capture, "tier": 1},
-        "embodiment.phone_screen_capture": {"fn": embodiment_phone_screen_capture, "tier": 2},
-        "embodiment.phone_tap": {"fn": embodiment_phone_tap, "tier": 2},
-        "embodiment.phone_swipe": {"fn": embodiment_phone_swipe, "tier": 2},
-        "embodiment.phone_type": {"fn": embodiment_phone_type, "tier": 2},
-        "embodiment.phone_launch_app": {"fn": embodiment_phone_launch_app, "tier": 2},
-        "embodiment.robot_get_state": {"fn": embodiment_robot_get_state, "tier": 0},
-        "embodiment.robot_move_joint": {"fn": embodiment_robot_move_joint, "tier": 2},
-        "embodiment.robot_set_gripper": {"fn": embodiment_robot_set_gripper, "tier": 2},
     }
     registry.update(load_generated_registry())
     return merge_runtime_tool_metadata(registry)

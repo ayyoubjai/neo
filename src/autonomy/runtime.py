@@ -62,19 +62,22 @@ class AutonomyRuntimeConfig:
     epistemic_max_theory_attempts: int
     goal_min_grounding_confidence: float
     power_max_goal_attempts: int
+    knowledge_enabled: bool = False
 
 
 def build_runtime_config(settings: Settings) -> AutonomyRuntimeConfig:
     autonomy = dict(settings.autonomy or {})
     epistemic_enabled = _coerce_bool(autonomy.get("epistemic_enabled"), False)
     power_enabled = _coerce_bool(autonomy.get("power_process_enabled"), False)
+    knowledge_enabled = _coerce_bool(autonomy.get("knowledge_enabled"), False)
     explicit_enabled = autonomy.get("enabled")
     if explicit_enabled is None:
-        enabled = epistemic_enabled or power_enabled
+        enabled = epistemic_enabled or power_enabled or knowledge_enabled
     else:
         enabled = _coerce_bool(explicit_enabled, False)
     return AutonomyRuntimeConfig(
         enabled=enabled,
+        knowledge_enabled=knowledge_enabled,
         start_with_run_all=_coerce_bool(autonomy.get("start_with_run_all"), False),
         epistemic_enabled=epistemic_enabled,
         power_process_enabled=power_enabled,
@@ -94,7 +97,7 @@ def build_runtime_config(settings: Settings) -> AutonomyRuntimeConfig:
 
 
 def runtime_should_start(config: AutonomyRuntimeConfig) -> bool:
-    return bool(config.enabled and (config.epistemic_enabled or config.power_process_enabled))
+    return bool(config.enabled and (config.epistemic_enabled or config.power_process_enabled or config.knowledge_enabled))
 
 
 def run_all_should_start(config: AutonomyRuntimeConfig) -> bool:
@@ -131,8 +134,9 @@ async def serve(settings_path: Optional[str] = None) -> None:
         print(f"[autonomy] {exc}")
         return
 
-    world_model = WorldModel()
-    world_model.bootstrap_axioms()
+    world_model = WorldModel() if config.epistemic_enabled or config.power_process_enabled else None
+    if world_model is not None:
+        world_model.bootstrap_axioms()
     write_lock = asyncio.Lock()
     tasks = []
     try:
@@ -156,6 +160,7 @@ async def serve(settings_path: Optional[str] = None) -> None:
                     world_model,
                     cognition_client=cognition_client,
                     min_grounding_confidence=config.goal_min_grounding_confidence,
+                    objective=str(settings.autonomy.get("objective") or "Develop a connected understanding of the environment, its ideas, and uncertainties."),
                 ),
                 executor=Executor(cognition_client=cognition_client),
                 evaluator=Evaluator(
@@ -168,6 +173,10 @@ async def serve(settings_path: Optional[str] = None) -> None:
             )
             print("[autonomy] starting power process loop")
             tasks.append(asyncio.create_task(power_loop.run_forever(), name="power-process-loop"))
+        if config.knowledge_enabled:
+            from knowledge.worker import run_worker
+            print("[autonomy] starting knowledge investigation worker")
+            tasks.append(asyncio.create_task(run_worker(settings), name="knowledge-worker"))
         if not tasks:
             print("[autonomy] no loops enabled; exiting.")
             return
@@ -178,7 +187,8 @@ async def serve(settings_path: Optional[str] = None) -> None:
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        world_model.close()
+        if world_model is not None:
+            world_model.close()
 
 
 def main() -> None:

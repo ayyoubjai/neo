@@ -40,6 +40,7 @@ def _allowed_event(event_type: str, level: str) -> bool:
             "model_prompt",
             "model_output",
             "model_provider",
+            "tool_retrieval",
             "tool_request",
             "tool_response",
             "assistant_final",
@@ -55,6 +56,22 @@ def _append_human_line(path: str, line: str) -> None:
 
 
 def _format_human_event(event_type: str, payload: Dict[str, Any], max_chars: int) -> Optional[str]:
+    if event_type == "tool_retrieval":
+        selected = payload.get("selected_tool_ids", [])
+        scores = ", ".join(
+            f"{item['tool_id']}={item['score']:.4f}"
+            for item in payload.get("top_candidates", [])
+        )
+        line = (
+            f"TOOL_RETRIEVAL: status={payload.get('status')} "
+            f"min_similarity={payload.get('min_similarity')} "
+            f"selected={len(selected)}/{payload.get('max_tools')}\n"
+            f"RETRIEVED_TOOLS: {', '.join(selected) or 'none'}\n"
+            f"TOP_TOOL_SCORES: {scores or 'none'}"
+        )
+        if payload.get("error"):
+            line += f"\nRETRIEVAL_ERROR: {_truncate_text(str(payload['error']), max_chars)}"
+        return line
     if event_type == "user_query":
         text = payload.get("text") or ""
         if not isinstance(text, str) or not text:
@@ -71,7 +88,21 @@ def _format_human_event(event_type: str, payload: Dict[str, Any], max_chars: int
         if not isinstance(prompt, str) or not prompt:
             return None
         mode_label = mode if isinstance(mode, str) and mode else "UNKNOWN"
-        return f"PROMPT[{mode_label}]: {_truncate_text(prompt, max_chars)}"
+        lines = []
+        # Extract from the original prompt before truncation hides the catalog.
+        # Repeat per call so changes after initialization or codegen are visible.
+        marker = "AVAILABLE TOOLS:\n"
+        if marker in prompt:
+            catalog = prompt.rsplit(marker, 1)[1].split("\n\n", 1)[0]
+            tool_ids = [
+                line[2:].split(":", 1)[0].strip()
+                for line in catalog.splitlines()
+                if line.startswith("- ") and ":" in line
+            ]
+            model = payload.get("model") or mode_label
+            lines.append(f"TOOLS_GIVEN[{model}] ({len(tool_ids)}): {', '.join(tool_ids) or 'none'}")
+        lines.append(f"PROMPT[{mode_label}]: {_truncate_text(prompt, max_chars)}")
+        return "\n".join(lines)
     if event_type == "model_output":
         text = payload.get("text") or ""
         if not isinstance(text, str) or not text:

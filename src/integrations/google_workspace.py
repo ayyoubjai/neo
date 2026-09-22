@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import urllib.error
@@ -20,6 +21,7 @@ class GoogleAuthError(Exception):
 class GoogleWorkspaceManager:
     BUNDLE_SCOPES: Dict[str, Tuple[str, ...]] = {
         "gmail_send": ("https://www.googleapis.com/auth/gmail.send",),
+        "gmail_compose": ("https://www.googleapis.com/auth/gmail.compose",),
         "gmail_readonly": ("https://www.googleapis.com/auth/gmail.readonly",),
         "calendar_readonly": ("https://www.googleapis.com/auth/calendar.readonly",),
         "calendar_events": ("https://www.googleapis.com/auth/calendar.events",),
@@ -43,11 +45,13 @@ class GoogleWorkspaceManager:
                 {
                     "bundle": bundle,
                     "scopes": list(scopes),
-                    "authorized": bool(self._load_token_json(resolved_account, bundle)),
+                    "authorized": bool(self._load_token_json(resolved_account, bundle)) if self._cfg.get("enabled", True) else False,
                 }
             )
         client_path = self._client_secrets_path()
         return {
+            "enabled": self._cfg.get("enabled", True),
+            "oauth_client_source": self._cfg.get("oauth_client_source", "own"),
             "configured": os.path.exists(client_path),
             "client_secrets_path": client_path,
             "account_name": resolved_account,
@@ -62,8 +66,7 @@ class GoogleWorkspaceManager:
     ) -> Dict[str, Any]:
         resolved_account = self._resolve_account_name(account_name)
         scopes = self._scopes_for_bundle(bundle)
-        if force_reconsent:
-            self._delete_token_json(resolved_account, bundle)
+        self._require_enabled()
         creds = self._authorize_interactive(resolved_account, bundle, scopes)
         return {
             "authorized": True,
@@ -188,7 +191,7 @@ class GoogleWorkspaceManager:
         body_html: str = "",
         reply_to_message_id: str = "",
     ) -> Dict[str, Any]:
-        service = self._build_service(account_name, "gmail_send", "gmail", "v1")
+        service = self._build_service(account_name, "gmail_compose", "gmail", "v1")
         raw = self._build_gmail_raw_message(
             subject=subject,
             to=to,
@@ -357,6 +360,10 @@ class GoogleWorkspaceManager:
         text = str(account_name or "").strip()
         return text or self._default_account_name
 
+    def _require_enabled(self) -> None:
+        if not self._cfg.get("enabled", True):
+            raise GoogleAuthError("Google integration is disabled. Enable it explicitly in setup or local settings first.")
+
     def _client_secrets_path(self) -> str:
         configured = str(self._cfg.get("client_secrets_path", "")).strip()
         if configured:
@@ -364,6 +371,14 @@ class GoogleWorkspaceManager:
         return os.path.join(self._settings.workspace_root, "config", "google_client_secret.json")
 
     def _token_key(self, account_name: str, bundle: str) -> str:
+        if self._cfg.get("oauth_client_source") in {"neo", "own"}:
+            try:
+                with open(self._client_secrets_path(), encoding="utf-8") as handle:
+                    client_id = json.load(handle)["installed"]["client_id"]
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise GoogleAuthError("Unable to identify the configured Desktop OAuth client.") from exc
+            namespace = hashlib.sha256(client_id.encode()).hexdigest()[:24]
+            return f"{namespace}:{account_name}:{bundle}"
         return f"{account_name}:{bundle}"
 
     def _scopes_for_bundle(self, bundle: str) -> Tuple[str, ...]:
@@ -413,6 +428,7 @@ class GoogleWorkspaceManager:
             return
 
     def _load_credentials(self, account_name: str, bundle: str):
+        self._require_enabled()
         token_json = self._load_token_json(account_name, bundle)
         if not token_json:
             raise GoogleAuthError(
@@ -439,6 +455,7 @@ class GoogleWorkspaceManager:
         )
 
     def _authorize_interactive(self, account_name: str, bundle: str, scopes: Sequence[str]):
+        self._require_enabled()
         client_path = self._client_secrets_path()
         if not os.path.exists(client_path):
             raise GoogleAuthError(
@@ -446,8 +463,15 @@ class GoogleWorkspaceManager:
                 "Download an installed-app OAuth client from Google Cloud Console first."
             )
         _, _, InstalledAppFlow = self._google_auth_modules()
-        flow = InstalledAppFlow.from_client_secrets_file(client_path, scopes=list(scopes))
+        with open(client_path, encoding="utf-8") as handle:
+            client = json.load(handle).get("installed", {})
+        if (client.get("auth_uri") != "https://accounts.google.com/o/oauth2/auth"
+                or client.get("token_uri") != "https://oauth2.googleapis.com/token"):
+            raise GoogleAuthError("Use a Desktop OAuth client with Google's official OAuth endpoints.")
+        flow = InstalledAppFlow.from_client_secrets_file(client_path, scopes=list(scopes), autogenerate_code_verifier=True)
         host = str(self._cfg.get("oauth_bind_host", "127.0.0.1")).strip() or "127.0.0.1"
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            raise GoogleAuthError("Google OAuth callback must bind to a loopback address.")
         port = int(self._cfg.get("oauth_port", 0))
         open_browser = bool(self._cfg.get("open_browser", True))
         try:
@@ -460,6 +484,9 @@ class GoogleWorkspaceManager:
             )
         except OSError as exc:
             raise GoogleAuthError(f"Unable to start the local OAuth callback server: {exc}") from exc
+        granted = getattr(creds, "granted_scopes", None)
+        if (granted is not None and not set(scopes).issubset(set(granted))) or not creds.has_scopes(scopes):
+            raise GoogleAuthError("Google did not grant the required permissions; existing credentials were preserved.")
         self._store_token_json(account_name, bundle, creds.to_json())
         return creds
 

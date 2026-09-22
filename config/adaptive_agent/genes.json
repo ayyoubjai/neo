@@ -23,7 +23,6 @@
             "cognition_system2_max_steps": 1,
             "cognition_system3_enabled": false,
             "cognition_action_limit": 2,
-            "cognition_trivial_query_target": "system0",
             "cognition_mode": "small"
           },
           "autonomy": {
@@ -57,7 +56,6 @@
             "cognition_system2_max_steps": 1,
             "cognition_system3_enabled": false,
             "cognition_action_limit": 4,
-            "cognition_trivial_query_target": "system0",
             "cognition_mode": "small"
           },
           "autonomy": {
@@ -90,8 +88,7 @@
             "cognition_system1_max_steps": 4,
             "cognition_system2_max_steps": 3,
             "cognition_system3_enabled": false,
-            "cognition_action_limit": 6,
-            "cognition_trivial_query_target": "system1"
+            "cognition_action_limit": 6
           },
           "autonomy": {
             "requested_mode": "COGNITION",
@@ -126,8 +123,7 @@
             "cognition_system3_enabled": true,
             "cognition_system3_rounds": 1,
             "cognition_system3_parallel": true,
-            "cognition_action_limit": 8,
-            "cognition_trivial_query_target": "system1"
+            "cognition_action_limit": 8
           },
           "autonomy": {
             "requested_mode": "COGNITION"
@@ -211,7 +207,7 @@
       "payload": {
         "model_path": "models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "server_binary": "llama-server",
-        "bundles": ["model_runtime", "llama_swap"],
+        "bundles": ["model_runtime", "llama_router"],
         "options": {
           "ctx_size": 8192,
           "threads": 8,
@@ -296,27 +292,6 @@
       }
     },
     {
-      "id": "tool.phone.senses",
-      "type": "tool",
-      "priority": 70,
-      "purposes": ["phone_companion", "assistant"],
-      "requires": {
-        "device_classes": ["phone_small", "phone_strong"],
-        "android": true
-      },
-      "payload": {
-        "description": "Phone or Android-adjacent actions using existing embodiment phone tools.",
-        "bundles": ["phone_tools"],
-        "tool_ids": [
-          "embodiment.phone_screen_capture",
-          "embodiment.phone_tap",
-          "embodiment.phone_swipe",
-          "embodiment.phone_type",
-          "embodiment.phone_launch_app"
-        ]
-      }
-    },
-    {
       "id": "tool.vision.local",
       "type": "tool",
       "priority": 50,
@@ -353,20 +328,20 @@
       }
     },
     {
-      "id": "service.model.llama_swap",
+      "id": "service.model.llama_router",
       "type": "service",
-      "priority": 110,
+      "priority": 120,
       "purposes": ["assistant", "coding", "research", "automation"],
       "requires": {
         "device_classes": ["pc_medium", "pc_strong"],
         "min_ram_mb": 10000
       },
       "payload": {
-        "server_kind": "llama_swap",
-        "description": "Start llama-swap so strong machines can route across several GGUF models.",
-        "bundles": ["llama_swap"],
-        "binary": "llama-swap",
-        "config_path": "config/config.yaml",
+        "server_kind": "llama_router",
+        "description": "Start llama-router so strong machines can route across several GGUF models.",
+        "bundles": ["llama_router"],
+        "binary": "llama-router",
+        "config_path": "config/llama-router.local.yaml",
         "listen": "localhost:8080"
       }
     },

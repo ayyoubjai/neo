@@ -1,14 +1,20 @@
 # Cognitive Mode Analysis
 
+> Historical analysis: the implementation now includes completion checks, durable
+> continuation, mutation journaling, and provisional learning. See
+> [Cognition reliability](docs/cognition-reliability.md) for the current behavior.
+> The weaknesses and code locations below describe the earlier implementation.
+
 ## Architecture Overview
 
 The cognitive mode (`_run_cognition_loop`) is a **multi-phase, single-turn reasoning pipeline** that transforms a raw user turn into a grounded response. Every turn flows through these sequential phases:
 
 ```mermaid
 flowchart TD
-    A([User Turn]) --> B[Memory Retrieval + Tool Retrieval/Selection]
-    B --> C[INIT — query_state + state_of_mind + tools_needed]
-    C --> D{Callable Patterns?}
+    A([User Turn]) --> C{System0 triage}
+    C -- final --> Z
+    C -- escalate --> B[Memory Retrieval + Tool Retrieval/Selection]
+    B --> D{Callable Patterns?}
     D -- Yes --> E[Pattern Router]
     E -- use --> F[Pattern Execution Runtime]
     F -- success --> Z
@@ -17,7 +23,7 @@ flowchart TD
     D -- No --> G
     G[Thinking Router — system1 / system2 / system3]
     G --> H1[System1 loop — fast, reactive]
-    G --> H2[System2 loop — deliberative, multi-step]
+    G --> H2[System2 loop — INIT + deliberative, multi-step]
     G --> H3[System3 — multi-peer proposals + critics]
     H1 & H2 & H3 --> I[Finalize — force answer if budget exhausted]
     I --> Z[Result Payload]
@@ -70,23 +76,18 @@ Distillation in this system has **two distinct mechanisms** operating at differe
 
 ### Mechanism 1 — Episodic Cognition Distillation (per-turn)
 
-This is the primary, expensive distillation that runs after **every non-trivial turn**.
+This is the primary, expensive distillation that runs after each turn that is not explicitly skipped.
 
 #### 1A. Trigger Conditions (lines 7732–7770)
 
-Before distillation runs, two exclusion checks are evaluated:
+Before distillation runs, successful pattern executions are excluded:
 
 ```python
 _pattern_success = route_mode == "pattern" and result_payload.get("type") == "final"
-_trivial_turn = (
-    self._cognition_distill_skip_trivial
-    and len(text.strip()) < self._cognition_distill_trivial_max_chars  # default: 60 chars
-    and not observations
-)
 ```
 
 - **Pattern success skip**: If a stored pattern executed cleanly and returned a `final` result, distillation is skipped. The logic: *the pattern already encodes the knowledge; distilling again would be redundant and would risk polluting clean pattern entries with noise*.
-- **Trivial turn skip**: Very short inputs with no tool observations (e.g. "hi", "ok", "thanks") are excluded. Nothing actionable can be learned from them.
+- System0 answers are still eligible for distillation; triviality is decided by the System0 model rather than by text length or keyword heuristics.
 - **Budget-exhausted flag**: If the action budget was consumed with no result, a `budget_exhausted=True` flag is passed, which prepends a conservative instruction to the prompt telling the model to prefer `failure_lessons` over skills/patterns.
 
 #### 1B. Prompt Construction (`_build_cognition_distill_prompt`, line 3010)
@@ -242,5 +243,5 @@ This mechanism focuses purely on **user/world facts** (e.g., `user.name`, `user.
 
 | Distillation Type | Trigger | Output | Storage |
 |------------------|---------|--------|---------|
-| Episodic cognition distill | Every non-trivial post-reasoning turn | skills, patterns, facts, lessons, safety_rules | JSON catalogs + semantic memory |
+| Episodic cognition distill | Every post-reasoning turn unless explicitly skipped | skills, patterns, facts, lessons, safety_rules | JSON catalogs + semantic memory |
 | Exchange conversation distill | Every 12 turns (configurable) | facts, entities | Semantic memory (facts + entities) |

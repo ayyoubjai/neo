@@ -11,8 +11,10 @@ if SRC_ROOT not in sys.path:
     sys.path.insert(0, SRC_ROOT)
 
 from common.config import load_settings
-from model_server.hf_client import HfError, generate_text as hf_generate_text
-from model_server.ollama_client import OllamaError, generate as ollama_generate
+from model_server.hf_client import HfError
+from model_server.llamacpp_client import LlamacppError
+from model_server.local_generation import generate_local_text
+from model_server.ollama_client import OllamaError
 
 
 _LOCAL_MODEL_UNAVAILABLE_MESSAGE = (
@@ -434,7 +436,7 @@ def _format_reflection_block(reflection: Dict[str, Any]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="LLM candidate generator for evolve_improve.")
     parser.add_argument("--model", default="", help="Override model id for generation.")
-    parser.add_argument("--provider", default="", choices=["", "ollama", "hf"], help="Override provider.")
+    parser.add_argument("--provider", default="", choices=["", "ollama", "hf", "llamacpp"], help="Override provider.")
     parser.add_argument("--temperature", type=float, default=0.1, help="Sampling temperature.")
     parser.add_argument("--max-new-tokens", type=int, default=1200, help="Max new tokens.")
     parser.add_argument("--enable-thinking", action="store_true", help="Prepend /think to the prompt.")
@@ -491,20 +493,17 @@ def main() -> int:
             avoid_summaries=avoid_summaries,
         )
         try:
-            if provider == "hf":
-                output = hf_generate_text(
-                    prompt, model_id, temperature=args.temperature, max_new_tokens=args.max_new_tokens
-                )
-            else:
-                output = ollama_generate(
-                    prompt,
-                    model_id,
-                    system="Return only valid JSON as instructed.",
-                    options={"temperature": args.temperature},
-                    response_format="json",
-                )
+            output = generate_local_text(
+                prompt,
+                model_id,
+                provider=provider,
+                temperature=args.temperature,
+                max_new_tokens=args.max_new_tokens,
+                system="Return only valid JSON as instructed.",
+                response_format="json",
+            )
             data = _extract_json(output)
-        except (OllamaError, HfError, ValueError) as e:
+        except (OllamaError, HfError, LlamacppError, ValueError) as e:
             if not allow_local_fallback:
                 raise
             fallback_result = _build_local_fallback_result(

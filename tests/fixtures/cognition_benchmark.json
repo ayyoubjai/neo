@@ -1,0 +1,17 @@
+[
+  {
+    "id": "arithmetic-verification",
+    "request": "Use math.eval to calculate (17*23)+(41*19). Report the verified total.",
+    "acceptance_checks": [{"id": "total", "tool_id": "math.eval", "args": {"expr": "(17*23)+(41*19)"}, "path": ["result", "value"], "expected": 1170}],
+    "answer_contains": ["1170"]
+  },
+  {
+    "id": "two-independent-results",
+    "request": "Use math.eval separately for (83*17)-29 and (91*13)+47. Report both verified results, clearly labeled first and second.",
+    "acceptance_checks": [
+      {"id": "first", "tool_id": "math.eval", "args": {"expr": "(83*17)-29"}, "path": ["result", "value"], "expected": 1382},
+      {"id": "second", "tool_id": "math.eval", "args": {"expr": "(91*13)+47"}, "path": ["result", "value"], "expected": 1230}
+    ],
+    "answer_contains": ["1382", "1230"]
+  }
+]

@@ -20,11 +20,11 @@ def load_active_profile(path: str | Path = DEFAULT_OUTPUT_PATH) -> Dict[str, Any
 def selected_model_server(profile: Dict[str, Any]) -> Dict[str, Any]:
     for service in profile.get("services", []) or []:
         payload = service.get("payload") or {}
-        if payload.get("server_kind") in {"llama_cpp", "llama_swap"}:
+        if payload.get("server_kind") in {"llama_cpp", "llama_router"}:
             return service
     return {
-        "id": "service.model.llama_cpp.default",
-        "payload": {"server_kind": "llama_cpp"},
+        "id": "service.model.llama_router.default",
+        "payload": {"server_kind": "llama_router"},
     }
 
 
@@ -47,11 +47,11 @@ def build_llamacpp_command(profile: Dict[str, Any]) -> List[str]:
     return command
 
 
-def build_llama_swap_command(profile: Dict[str, Any]) -> List[str]:
+def build_llama_router_command(profile: Dict[str, Any]) -> List[str]:
     service = selected_model_server(profile)
     payload = service.get("payload") or {}
-    binary = os.environ.get("LLAMA_SWAP_BINARY") or payload.get("binary") or "llama-swap"
-    config = payload.get("config_path") or "config/config.yaml"
+    binary = os.environ.get("LLAMA_ROUTER_BINARY") or payload.get("binary") or "llama-router"
+    config = payload.get("config_path") or "config/llama-router.local.yaml"
     listen = payload.get("listen") or "localhost:8080"
     return [str(binary), "--config", str(config), "--listen", str(listen)]
 
@@ -59,8 +59,8 @@ def build_llama_swap_command(profile: Dict[str, Any]) -> List[str]:
 def build_model_server_command(profile: Dict[str, Any]) -> List[str]:
     service = selected_model_server(profile)
     payload = service.get("payload") or {}
-    if payload.get("server_kind") == "llama_swap":
-        return build_llama_swap_command(profile)
+    if payload.get("server_kind") == "llama_router":
+        return build_llama_router_command(profile)
     return build_llamacpp_command(profile)
 
 
@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         print(shlex.join(command))
         return 0
     service = selected_model_server(profile)
-    if (service.get("payload") or {}).get("server_kind") != "llama_swap":
+    if (service.get("payload") or {}).get("server_kind") != "llama_router":
         model_path = Path(command[2]).expanduser()
         if not model_path.exists():
             print(f"Model file is missing: {model_path}")

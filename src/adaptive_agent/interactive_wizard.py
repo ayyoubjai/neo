@@ -11,17 +11,14 @@ Ask the user questions to figure out:
 2. Any Aliases the agent should respond to
 3. The Purpose or Role of the agent
 4. The Personality or Behavioral traits
-5. A list of specific Tools or Capabilities the agent will need (e.g., 'Python execution', 'Read CSVs', 'Send Emails')
-
 Converse with the user naturally. Do not ask all questions at once. Ask one or two at a time.
-Once you have enough information to confidently define all 5 points, output the final configuration as a JSON block wrapped in ```json ... ``` markdown.
+Once you have enough information to confidently define the agent identity and behavior, output the final configuration as a JSON block wrapped in ```json ... ``` markdown.
 The JSON must have this exact structure:
 {
   "name": "string",
   "aliases": ["string", "string"],
   "purpose": "string",
-  "personality": "string (A detailed system prompt instruction)",
-  "tools_needed": ["string", "string"]
+  "personality": "string (A detailed system prompt instruction)"
 }
 Only output the JSON block when you are completely finished with the interview.
 """

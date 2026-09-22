@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import asyncio
 from typing import Optional, TYPE_CHECKING
 
 from autonomy.cognition_client import CognitionClient, CognitionJsonError
@@ -14,12 +15,14 @@ if TYPE_CHECKING:
 class _GoalProposal:
     goal_text: str
     reasoning: str
+    success_criteria: str = ""
 
     @classmethod
     def from_dict(cls, payload: dict) -> "_GoalProposal":
         return cls(
             goal_text=str(payload.get("goal_text", "")),
             reasoning=str(payload.get("reasoning", "")),
+            success_criteria=str(payload.get("success_criteria", "")),
         )
 
 
@@ -30,15 +33,17 @@ class Motivator:
         *,
         cognition_client: Optional[CognitionClient] = None,
         min_grounding_confidence: float = 0.5,
+        objective: str = "Develop a connected understanding of the environment, its ideas, and uncertainties.",
     ) -> None:
         self.world_model = world_model
         self.cognition_client = cognition_client or CognitionClient()
         self.min_grounding_confidence = float(min_grounding_confidence)
+        self.objective = objective
 
     async def motivate_goal(self) -> Goal:
-        theories = self.world_model.get_grounded_theories(limit=10, min_confidence=self.min_grounding_confidence)
+        theories = await asyncio.to_thread(self.world_model.get_grounded_theories, limit=10, min_confidence=self.min_grounding_confidence)
         if not theories:
-            return self.world_model.add_goal(
+            return await asyncio.to_thread(self.world_model.add_goal,
                 text="Gather one concrete piece of evidence about the local environment using a safe, read-only tool.",
                 reasoning="No theories are grounded strongly enough yet, so the next rational goal is to collect evidence safely.",
                 grounding_theory_ids=[],
@@ -49,13 +54,16 @@ class Motivator:
         )
         prompt = f"""
 You are Layer 5 of an autonomous agent.
-Synthesize one pragmatic goal grounded in the world model truths below.
+Synthesize one pragmatic goal using the provisional world model below.
+Purpose: {self.objective}
 
 [GROUNDED THEORIES]
 {theory_texts}
 
 Rules:
 - The goal must be concrete, testable, and achievable via the currently available tools.
+- Supply explicit success_criteria describing the evidence that would establish completion.
+- Belief confidence does not authorize actions; stay within the configured purpose.
 - Prefer goals that extend the current world model instead of vague aspirations.
 - Do not call tools. Synthesize the goal only from the grounded theories shown here.
 
@@ -67,14 +75,15 @@ Alignment safety constraints (MANDATORY):
 """.strip()
         try:
             proposal = await self.cognition_client.generate_model(prompt, _GoalProposal)
-        except CognitionJsonError:
-            return self.world_model.add_goal(
+        except Exception:
+            return await asyncio.to_thread(self.world_model.add_goal,
                 text="Probe a grounded theory with one safe, read-only action.",
                 reasoning="Goal generation failed, so fall back to a simple evidence-gathering task.",
                 grounding_theory_ids=[theory.id for theory in theories[:3]],
             )
-        return self.world_model.add_goal(
+        return await asyncio.to_thread(self.world_model.add_goal,
             proposal.goal_text,
             proposal.reasoning,
             grounding_theory_ids=[theory.id for theory in theories],
+            success_criteria=proposal.success_criteria or proposal.goal_text,
         )

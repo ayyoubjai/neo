@@ -13,8 +13,7 @@ if SRC_ROOT not in sys.path:
     sys.path.insert(0, SRC_ROOT)
 
 from common.config import load_settings
-from model_server.hf_client import generate_text as hf_generate_text
-from model_server.ollama_client import generate as ollama_generate
+from model_server.local_generation import generate_local_text
 
 
 def _normalize_path(path: str) -> str:
@@ -262,7 +261,7 @@ def main() -> int:
     parser.add_argument("--repo-root", default=".", help="Repository root.")
     parser.add_argument("--object-ids", default="", help="Comma-separated callable ids.")
     parser.add_argument("--max-cases", type=int, default=8, help="Maximum scenario count.")
-    parser.add_argument("--provider", default="auto", choices=["auto", "ollama", "hf"])
+    parser.add_argument("--provider", default="auto", choices=["auto", "ollama", "hf", "llamacpp"])
     parser.add_argument("--model", default="", help="Override model id.")
     parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--max-new-tokens", type=int, default=1000)
@@ -306,21 +305,15 @@ def main() -> int:
     if not model:
         raise SystemExit("[error] no model configured (settings.models.text_model or evolve.evolution_model)")
 
-    if provider == "hf":
-        output = hf_generate_text(
-            prompt,
-            model,
-            temperature=float(args.temperature),
-            max_new_tokens=max(32, int(args.max_new_tokens)),
-        )
-    else:
-        output = ollama_generate(
-            prompt,
-            model,
-            system="Return only strict JSON for the requested schema.",
-            options={"temperature": float(args.temperature)},
-            response_format="json",
-        )
+    output = generate_local_text(
+        prompt,
+        model,
+        provider=provider,
+        temperature=float(args.temperature),
+        max_new_tokens=max(32, int(args.max_new_tokens)),
+        system="Return only strict JSON for the requested schema.",
+        response_format="json",
+    )
 
     data = _extract_json(output)
     raw_scenarios = data.get("scenarios")

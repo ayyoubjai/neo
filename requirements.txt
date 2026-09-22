@@ -9,8 +9,8 @@ ultralytics
 numpy
 pyttsx3
 sympy
-pyautogui
 pillow
+pyautogui
 pygetwindow
 pypdf
 transformers

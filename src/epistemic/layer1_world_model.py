@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import copy
+import json
+from contextlib import nullcontext
 import time
 import uuid
 from typing import Iterable, Optional
@@ -24,20 +27,37 @@ class WorldModel:
         uri: Optional[str] = None,
         user: Optional[str] = None,
         password: Optional[str] = None,
+        *,
+        ensure_schema: bool = True,
     ) -> None:
         from neo4j import GraphDatabase
 
         resolved_uri = uri or os.getenv("EPISTEMIC_NEO4J_URI", "bolt://localhost:7687")
         resolved_user = user or os.getenv("EPISTEMIC_NEO4J_USER", "neo4j")
         resolved_password = password or os.getenv("EPISTEMIC_NEO4J_PASSWORD", "epistemic123")
-        self.driver = GraphDatabase.driver(resolved_uri, auth=(resolved_user, resolved_password))
-        self._ensure_schema()
+        self.driver = GraphDatabase.driver(resolved_uri, auth=(resolved_user, resolved_password),
+            connection_timeout=2.0, connection_acquisition_timeout=3.0, max_transaction_retry_time=3.0)
+        if ensure_schema:
+            self._ensure_schema()
+
+    def run_transaction(self, operation):
+        """Run a whole belief/goal transition atomically, including its provenance."""
+        with self.driver.session() as session:
+            def apply(tx):
+                bound = copy.copy(self)
+                class TransactionDriver:
+                    def session(self):
+                        return nullcontext(tx)
+                bound.driver = TransactionDriver()
+                return operation(bound)
+            return session.execute_write(apply)
 
     def close(self) -> None:
         self.driver.close()
 
     def _ensure_schema(self) -> None:
         queries = (
+            "CREATE CONSTRAINT concept_name_unique IF NOT EXISTS FOR (c:Concept) REQUIRE c.name IS UNIQUE",
             "CREATE CONSTRAINT theory_id_unique IF NOT EXISTS FOR (t:Theory) REQUIRE t.id IS UNIQUE",
             "CREATE CONSTRAINT theory_text_unique IF NOT EXISTS FOR (t:Theory) REQUIRE t.text IS UNIQUE",
             "CREATE CONSTRAINT goal_id_unique IF NOT EXISTS FOR (g:Goal) REQUIRE g.id IS UNIQUE",
@@ -59,6 +79,9 @@ class WorldModel:
             confidence_score=float(node.get("confidence_score", 0.0)),
             predictive_success_rate=float(node.get("predictive_success_rate", 0.0)),
             attempts=int(node.get("attempts", 0)),
+            status=str(node.get("status", "active")),
+            kind=str(node.get("kind", "hypothesis")),
+            updated_at=float(node.get("updated_at", 0)),
         )
 
     @staticmethod
@@ -69,7 +92,12 @@ class WorldModel:
             reasoning=node["reasoning"],
             status=node["status"],
             attempts=int(node.get("attempts", 0)),
+            success_criteria=str(node.get("success_criteria", node["text"])),
         )
+
+    def has_observation(self, observation_id: str) -> bool:
+        with self.driver.session() as session:
+            return session.run("MATCH (o:Observation {id: $id}) RETURN o.id AS id", id=observation_id).single() is not None
 
     def theory_count(self) -> int:
         query = "MATCH (t:Theory) RETURN count(t) AS count"
@@ -102,7 +130,9 @@ class WorldModel:
         return None
 
     def get_untested_theory(self, *, max_attempts: Optional[int] = None) -> Optional[Theory]:
-        where_clause = "WHERE t.attempts < $max_attempts" if max_attempts is not None else ""
+        where_clause = "WHERE coalesce(t.status, 'active') = 'active' AND coalesce(t.next_test_at, 0) <= $now"
+        if max_attempts is not None:
+            where_clause += " AND t.attempts < $max_attempts"
         query = f"""
         MATCH (t:Theory)
         {where_clause}
@@ -112,44 +142,39 @@ class WorldModel:
         """
         with self.driver.session() as session:
             kwargs = {"max_attempts": int(max_attempts)} if max_attempts is not None else {}
+            kwargs["now"] = self._now()
             record = session.run(query, **kwargs).single()
             if record:
                 return self._theory_from_node(record["t"])
         return None
 
-    def update_theory(self, theory_id: str, new_confidence: float, success: bool) -> None:
-        # Apply temporal decay: observations decay linearly from weight=1.0 at age 0
-        # to weight=0.5 at age 60 days, then remain at 0.5 for older theories.
-        # This prevents stale theories from remaining indefinitely "trusted".
-        query_read = "MATCH (t:Theory {id: $id}) RETURN t.updated_at AS updated_at, t.attempts AS attempts"
+    def get_revalidation_theory(self, *, stale_after_days: float = 30) -> Optional[Theory]:
+        # Retired beliefs remain in the graph, but do not compete with active beliefs.
+        query = """
+        MATCH (t:Theory)
+        WHERE coalesce(t.status, 'active') = 'active'
+          AND t.attempts > 0 AND coalesce(t.updated_at, 0) < $cutoff
+          AND coalesce(t.next_test_at, 0) <= $now
+        RETURN t ORDER BY t.updated_at ASC LIMIT 1
+        """
         with self.driver.session() as session:
-            record = session.run(query_read, id=theory_id).single()
-            if record is None:
-                return
-            updated_at = float(record["updated_at"] or 0)
-        age_days = max(0.0, (self._now() - updated_at) / 86400)
-        recency_weight = max(0.5, 1.0 - (age_days / 120.0))
-        decay_adjusted_new_confidence = (
-            new_confidence * recency_weight
-            + (1.0 - recency_weight) * 0.5  # pull toward neutral when stale
-        )
+            record = session.run(query, cutoff=self._now() - stale_after_days * 86400, now=self._now()).single()
+            return self._theory_from_node(record["t"]) if record else None
+
+    def update_theory(self, theory_id: str, new_confidence: float, success: bool) -> None:
         query = """
         MATCH (t:Theory {id: $id})
+        WITH t, coalesce(t.attempts, 0) AS previous_attempts,
+             coalesce(t.predictive_success_rate, 0.0) AS previous_rate
         SET t.confidence_score = $new_confidence,
-            t.attempts = t.attempts + 1,
-            t.predictive_success_rate =
-                ((t.predictive_success_rate * t.attempts) + $success_value) / (t.attempts + 1),
+            t.attempts = previous_attempts + 1,
+            t.predictive_success_rate = (previous_rate * previous_attempts + $success_value) / (previous_attempts + 1),
+            t.status = CASE WHEN $new_confidence <= 0 THEN 'retired' ELSE 'active' END,
             t.updated_at = $updated_at
         """
-        success_value = 1.0 if success else 0.0
         with self.driver.session() as session:
-            session.run(
-                query,
-                id=theory_id,
-                new_confidence=float(max(0.0, min(1.0, decay_adjusted_new_confidence))),
-                success_value=success_value,
-                updated_at=self._now(),
-            )
+            session.run(query, id=theory_id, new_confidence=float(max(0.0, min(1.0, new_confidence))),
+                        success_value=1.0 if success else 0.0, updated_at=self._now())
 
     def delete_theory(self, theory_id: str) -> None:
         query = "MATCH (t:Theory {id: $id}) DETACH DELETE t"
@@ -169,18 +194,95 @@ class WorldModel:
         return theories
 
     def get_grounded_theories(self, *, limit: int = 5, min_confidence: float = 0.3) -> list[Theory]:
+        # Staleness reduces eligibility without silently rewriting historical confidence
+        # or increasing confidence in weak beliefs merely because time passed.
         query = """
         MATCH (t:Theory)
-        WHERE t.confidence_score >= $min_confidence
-        RETURN t
-        ORDER BY t.predictive_success_rate DESC, t.confidence_score DESC, t.attempts DESC
-        LIMIT $limit
+        WHERE coalesce(t.status, 'active') = 'active' AND t.attempts > 0
+        WITH t, CASE WHEN $now - coalesce(t.updated_at, 0) <= 2592000 THEN 1.0
+                     ELSE 1.0 / (1.0 + ($now - coalesce(t.updated_at, 0) - 2592000) / 2592000) END AS freshness
+        WHERE t.confidence_score * freshness >= $min_confidence
+        RETURN t ORDER BY t.predictive_success_rate DESC, t.confidence_score DESC LIMIT $limit
         """
-        theories: list[Theory] = []
         with self.driver.session() as session:
-            for record in session.run(query, limit=int(limit), min_confidence=float(min_confidence)):
-                theories.append(self._theory_from_node(record["t"]))
-        return theories
+            return [self._theory_from_node(record["t"]) for record in session.run(
+                query, now=self._now(), limit=int(limit), min_confidence=float(min_confidence))]
+
+    def enrich_theory(self, theory_id: str, *, kind: str, concepts: Iterable[str],
+                      parent_id: Optional[str], relation: str, observation_id: str) -> None:
+        kind = kind if kind in {"idea", "hypothesis", "belief"} else "hypothesis"
+        relation = relation if relation in {"REFINES", "EXTENDS", "CONTRADICTS", "RELATED_TO"} else "RELATED_TO"
+        names = list(dict.fromkeys(" ".join(c.lower().split())[:120] for c in concepts if isinstance(c, str) and c.strip()))[:8]
+        with self.driver.session() as session:
+            session.run("MATCH (t:Theory {id: $id}) SET t.kind = coalesce(t.kind, $kind)", id=theory_id, kind=kind)
+            session.run("""
+                MATCH (t:Theory {id: $id})
+                UNWIND $names AS name
+                MERGE (c:Concept {name: name})
+                MERGE (t)-[r:ABOUT {source_observation_id: $observation_id}]->(c)
+                SET r.status = 'proposed', r.origin = 'model'
+                """, id=theory_id, names=names, observation_id=observation_id)
+            if parent_id and parent_id != theory_id:
+                # Only an allowlisted relationship name is interpolated, never model text.
+                session.run(f"""
+                    MATCH (child:Theory {{id: $id}}), (parent:Theory {{id: $parent_id}})
+                    MERGE (child)-[r:{relation} {{source_observation_id: $observation_id}}]->(parent)
+                    SET r.status = 'proposed', r.origin = 'model'
+                    """, id=theory_id, parent_id=parent_id, observation_id=observation_id)
+
+    def search_beliefs(self, terms: list[str], *, limit: int = 5) -> list[dict]:
+        query = """
+        MATCH (t:Theory)
+        WITH t, size([term IN $terms WHERE toLower(t.text) CONTAINS term]) AS relevance
+        WHERE relevance > 0
+        WITH t, relevance ORDER BY relevance DESC, t.updated_at DESC LIMIT $limit
+        OPTIONAL MATCH (t)-[:TESTED_BY]->(o:Observation)
+        RETURN t.id AS id, t.text AS text, coalesce(t.kind, 'hypothesis') AS kind,
+               coalesce(t.status, 'active') AS status, t.confidence_score AS confidence,
+               t.updated_at AS last_tested_at, collect(o.id)[0..3] AS observation_ids
+        """
+        with self.driver.session() as session:
+            records = [dict(record) for record in session.run(query, terms=terms, limit=limit)]
+        for record in records:
+            record["relationships"] = self.get_theory_context(record["id"])
+        return records
+
+    def get_theory_context(self, theory_id: str) -> list[dict]:
+        query = """
+        MATCH (t:Theory {id: $id})-[r]-(other:Theory)
+        WHERE type(r) IN ['REFINES', 'EXTENDS', 'CONTRADICTS', 'RELATED_TO']
+        RETURN other.id AS id, other.text AS text, other.status AS status,
+               type(r) AS relation, r.status AS relation_status,
+               startNode(r).id AS source_id, endNode(r).id AS target_id
+        LIMIT 6
+        UNION
+        MATCH (t:Theory {id: $id})-[:ABOUT]->(c:Concept)<-[:ABOUT]-(other:Theory)
+        WHERE other.id <> t.id
+        RETURN DISTINCT other.id AS id, other.text AS text, other.status AS status,
+               'SHARES_CONCEPT' AS relation, 'proposed' AS relation_status,
+               t.id AS source_id, other.id AS target_id
+        LIMIT 6
+        """
+        with self.driver.session() as session:
+            return [dict(record) for record in session.run(query, id=theory_id)]
+
+    def get_goal_execution_outcome(self, observation_id: str) -> Optional[ExecutionOutcome]:
+        with self.driver.session() as session:
+            record = session.run(
+                "MATCH (o:Observation {id: $id, kind: 'goal_execution'}) RETURN o",
+                id=observation_id,
+            ).single()
+            return ExecutionOutcome.from_dict(dict(record["o"])) if record else None
+
+    def get_goal_history(self, goal_id: str) -> list[dict]:
+        query = """
+        MATCH (:Goal {id: $id})-[:ATTEMPTED_BY]->(o:Observation)
+        RETURN o.action_taken AS action_taken, o.sensor_data AS sensor_data,
+               o.ok AS ok, o.reasoning AS reasoning, o.completion_score AS completion_score
+        ORDER BY o.created_at DESC LIMIT 5
+        """
+        with self.driver.session() as session:
+            return [dict(record) for record in session.run(query, id=goal_id)]
 
     def add_goal(
         self,
@@ -188,6 +290,7 @@ class WorldModel:
         reasoning: str,
         *,
         deduplicate_pending: bool = True,
+        success_criteria: str = "",
         grounding_theory_ids: Optional[Iterable[str]] = None,
     ) -> Goal:
         normalized_text = " ".join(str(text).split()).strip()
@@ -208,6 +311,7 @@ class WorldModel:
             id=str(uuid.uuid4()),
             text=normalized_text,
             reasoning=normalized_reasoning or "No explicit reasoning provided.",
+            success_criteria=success_criteria or normalized_text,
         )
         timestamp = self._now()
         query = """
@@ -216,6 +320,7 @@ class WorldModel:
                 id: $id,
                 text: $text,
                 reasoning: $reasoning,
+                success_criteria: $success_criteria,
                 status: $status,
                 attempts: $attempts,
                 created_at: $created_at,
@@ -229,6 +334,7 @@ class WorldModel:
                 id=goal.id,
                 text=goal.text,
                 reasoning=goal.reasoning,
+                success_criteria=goal.success_criteria,
                 status=goal.status,
                 attempts=goal.attempts,
                 created_at=timestamp,
@@ -309,20 +415,14 @@ class WorldModel:
         theory = Theory(id=str(uuid.uuid4()), text=normalized)
         timestamp = self._now()
         query = """
-        CREATE (
-            t:Theory {
-                id: $id,
-                text: $text,
-                confidence_score: $confidence_score,
-                predictive_success_rate: $predictive_success_rate,
-                attempts: $attempts,
-                created_at: $created_at,
-                updated_at: $updated_at
-            }
-        )
+        MERGE (t:Theory {text: $text})
+        ON CREATE SET t.id = $id, t.confidence_score = $confidence_score,
+            t.predictive_success_rate = $predictive_success_rate, t.attempts = $attempts,
+            t.created_at = $created_at, t.updated_at = $updated_at, t.status = 'active'
+        RETURN t
         """
         with self.driver.session() as session:
-            session.run(
+            record = session.run(
                 query,
                 id=theory.id,
                 text=theory.text,
@@ -331,7 +431,8 @@ class WorldModel:
                 attempts=theory.attempts,
                 created_at=timestamp,
                 updated_at=timestamp,
-            )
+            ).single()
+            theory = self._theory_from_node(record["t"])
         if source_observation_id:
             self._link_observation_to_theory(source_observation_id, theory.id)
         return theory
@@ -356,6 +457,8 @@ class WorldModel:
             o.sensor_data = $sensor_data,
             o.ok = $ok,
             o.match = $match,
+            o.verdict = $verdict,
+            o.evidence_json = $evidence_json,
             o.reasoning = $reasoning,
             o.confidence_in_data = $confidence_in_data,
             o.suggested_confidence_adjustment = $suggested_confidence_adjustment,
@@ -372,7 +475,9 @@ class WorldModel:
                 action_taken=observation.action_taken,
                 sensor_data=observation.sensor_data,
                 ok=bool(observation.ok),
-                match=bool(error.match),
+                match=error.verdict == "supports",
+                verdict=error.verdict,
+                evidence_json=json.dumps(observation.evidence),
                 reasoning=error.reasoning,
                 confidence_in_data=float(error.confidence_in_data),
                 suggested_confidence_adjustment=float(error.suggested_confidence_adjustment),
@@ -383,10 +488,13 @@ class WorldModel:
             rel_query = """
             MATCH (t:Theory {id: $theory_id})
             MATCH (o:Observation {id: $observation_id})
-            MERGE (t)-[:TESTED_BY]->(o)
+            MERGE (t)-[r:TESTED_BY]->(o)
+            SET r.verdict = $verdict,
+                t.next_test_at = $next_test_at
             """
             with self.driver.session() as session:
-                session.run(rel_query, theory_id=theory.id, observation_id=observation.id)
+                session.run(rel_query, theory_id=theory.id, observation_id=observation.id,
+                            verdict=error.verdict, next_test_at=timestamp + (300 if error.verdict == "inconclusive" else 0))
         return observation.id
 
     def record_goal_execution(
@@ -395,7 +503,7 @@ class WorldModel:
         execution: GoalExecution,
         outcome: ExecutionOutcome,
     ) -> str:
-        observation_id = str(uuid.uuid4())
+        observation_id = execution.id
         timestamp = self._now()
         completion_score = float(getattr(outcome, "completion_score", 1.0 if outcome.match else 0.0))
         query = """
@@ -403,6 +511,7 @@ class WorldModel:
             o:Observation {
                 id: $id,
                 kind: 'goal_execution',
+                evidence_json: $evidence_json,
                 goal_id: $goal_id,
                 action_taken: $action_taken,
                 sensor_data: $sensor_data,
@@ -426,6 +535,7 @@ class WorldModel:
                 query,
                 id=observation_id,
                 goal_id=goal.id,
+                evidence_json=json.dumps(execution.evidence),
                 action_taken=execution.action_taken,
                 sensor_data=execution.sensor_data,
                 ok=bool(execution.ok),

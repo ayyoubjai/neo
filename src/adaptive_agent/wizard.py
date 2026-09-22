@@ -65,7 +65,6 @@ def main(argv: list[str] | None = None) -> int:
     # Interactive Mode Arguments
     parser.add_argument("--interactive", action="store_true", help="Run the interactive LLM-based initialization wizard.")
     parser.add_argument("--model", default="Llama-3.1-8B-Instruct-Q4_K_M.gguf", help="The LLaMA model to use for the interactive wizard.")
-    parser.add_argument("--auto-inject-tools", action="store_true", help="Automatically inject generated tools into the runtime without prompting.")
     
     args = parser.parse_args(argv)
 
@@ -75,7 +74,6 @@ def main(argv: list[str] | None = None) -> int:
         
         purpose = config_data.get("purpose", args.purpose or "assistant")
         personality = config_data.get("personality", args.personality or "pragmatic, concise")
-        tools_needed = config_data.get("tools_needed", [])
         
         config_dir = Path(args.output).resolve().parents[1]
         system_entity_path = config_dir / "system_entity.json"
@@ -100,7 +98,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         purpose = args.purpose or _ask("Purpose: coding, assistant, research, automation, phone_companion", "assistant")
         personality = args.personality or _ask("Personality", "pragmatic, concise, local-first")
-        tools_needed = []
     data = build_profile(
         purpose=purpose,
         personality=personality,
@@ -118,16 +115,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Selected cognition gene: {cognition_id}")
     print(f"Selected model gene: {model_id}")
     print(f"Enabled tools: {len(data['tools'])}")
-    
-    if args.interactive and tools_needed:
-        device_class = data['device']['device_class']
-        if device_class in ["pc_medium", "pc_strong"]:
-            print(f"\n[+] Capable device detected ({device_class}). Starting Tool Generation Stage...")
-            from tool_runtime.tool_generator import generate_tools
-            generate_tools(tools_needed, auto_inject=args.auto_inject_tools)
-        else:
-            print(f"\n[-] Device class '{device_class}' is too constrained for on-device tool generation. Skipping tool generation.")
-            
     return 0
 
 

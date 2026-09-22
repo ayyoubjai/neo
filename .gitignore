@@ -1,4 +1,5 @@
 /data/
+/config/firewall.local.nft
 /workspace/
 /screenshots/
 /venv/
@@ -9,6 +10,7 @@
 /config/settings.local.json
 /config/settings.json
 /config/llama-swap.local.yaml
+/config/llama-router.local.yaml
 /config/config.yaml
 /config/google_client_secret.json
 /dist/
@@ -19,3 +21,11 @@ data/neo4j/
 node_modules/
 *.pt
 *.safetensors
+
+# Local credentials, generated model presets, and scratch artifacts
+/config/google_oauth/
+/config/models.ini
+/connect.py
+/tmp.txt
+/tmp_data/
+.pytest_cache/

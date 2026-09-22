@@ -38,6 +38,13 @@ class _FakeWriter:
 
 
 class OrchestratorSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_submit_turn_preserves_caller_acceptance_checks(self):
+        session = OrchestratorSession("127.0.0.1", 50051)
+        session.send_event = AsyncMock()
+        checks = [{"id": "value", "tool_id": "math.eval", "path": ["result", "value"], "expected": 42}]
+        await session.submit_turn("Calculate", acceptance_checks=checks)
+        self.assertEqual(session.send_event.await_args.args[0]["payload"]["acceptance_checks"], checks)
+
     async def test_reads_events_tracks_permissions_and_sends_decisions(self) -> None:
         drafts: List[Dict[str, Any]] = []
         finals: List[Dict[str, Any]] = []

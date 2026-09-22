@@ -25,19 +25,23 @@ class PowerProcessLoop:
         self.executor = executor
         self.evaluator = evaluator
         self.pause_seconds = max(0.0, float(pause_seconds))
-        # Shared lock with the epistemic loop to prevent concurrent Neo4j writes
-        # from corrupting goal/theory state. Pass the same asyncio.Lock instance
-        # to both PowerProcessLoop and EpistemicLoop at construction time.
+        # Retained for constructor compatibility; graph writes use transactions.
         self._write_lock = write_lock or asyncio.Lock()
+        self._pending_execution = None
 
     async def run_cycle(self) -> PowerCycleResult:
-        async with self._write_lock:
-            goal = self.world_model.get_pending_goal()
+        if self._pending_execution is None:
+            goal = await asyncio.to_thread(self.world_model.get_pending_goal)
             if goal is None:
                 goal = await self.motivator.motivate_goal()
-        execution = await self.executor.execute_goal(goal)
-        async with self._write_lock:
-            outcome = await self.evaluator.evaluate(goal, execution)
+            goal.history = await asyncio.to_thread(self.world_model.get_goal_history, goal.id)
+            execution = await self.executor.execute_goal(goal)
+            self._pending_execution = (goal, execution)
+        else:
+            goal, execution = self._pending_execution
+        # Evaluation calls the model outside database locks; persistence is transactional.
+        outcome = await self.evaluator.evaluate(goal, execution)
+        self._pending_execution = None
         return PowerCycleResult(
             goal=goal,
             execution=execution,
@@ -46,7 +50,12 @@ class PowerProcessLoop:
 
     async def run_forever(self) -> None:
         while True:
-            result = await self.run_cycle()
+            try:
+                result = await self.run_cycle()
+            except Exception as exc:
+                print(f"[PowerProcessLoop] cycle failed: {exc}")
+                await asyncio.sleep(max(2.0, self.pause_seconds))
+                continue
             print(
                 "[PowerProcessLoop]",
                 result.goal.text[:120],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Optional, TYPE_CHECKING
 
 from autonomy.cognition_client import CognitionClient, CognitionClientError
@@ -43,21 +44,16 @@ class EpistemicLoop:
         self.curiosity_interval = max(0, int(curiosity_interval))
         self.max_theory_attempts = max(1, int(max_theory_attempts))
         self.pause_seconds = max(0.0, float(pause_seconds))
-        self._topic_index = 0
         self._cycles_since_curiosity = 0
-        # Per-topic observation count for priority-based curiosity selection.
-        # Topics with fewer observations are preferred to avoid round-robin bias.
+        # Per-topic exploration attempts balance attention, including failures.
         self._topic_observation_counts: dict[str, int] = {
             topic: 0 for topic in self.curiosity_topics
         }
-        # Shared lock with the power loop to prevent concurrent Neo4j writes.
+        # Serialize local focus/commit operations; persistence is transactional.
         self._write_lock = write_lock or asyncio.Lock()
 
     def _next_curiosity_topic(self) -> str:
-        """Return the least-explored curiosity topic (fewest observations so far).
-
-        Falls back to round-robin if counts are all equal or topic list is empty.
-        """
+        """Return the least-attempted topic, resolving ties by configured order."""
         if not self.curiosity_topics:
             return "unknown aspects of the environment"
         # Priority: pick the topic with the lowest observation count
@@ -71,26 +67,21 @@ class EpistemicLoop:
         return least_explored
 
     def _select_focus(self) -> tuple[Optional[Theory], Optional[str]]:
-        theory = self.world_model.get_untested_theory(max_attempts=self.max_theory_attempts)
-        should_use_curiosity = theory is None or (
-            self.curiosity_interval > 0 and self._cycles_since_curiosity >= self.curiosity_interval
-        )
-        if should_use_curiosity:
+        if self.curiosity_interval > 0 and self._cycles_since_curiosity >= self.curiosity_interval:
+            self._cycles_since_curiosity = 0
+            return None, self._next_curiosity_topic()
+        theory = self.world_model.get_revalidation_theory()
+        if theory is None:
+            theory = self.world_model.get_untested_theory(max_attempts=self.max_theory_attempts)
+        if theory is None:
             self._cycles_since_curiosity = 0
             return None, self._next_curiosity_topic()
         self._cycles_since_curiosity += 1
-        if theory is None:
-            # Fallback: if no untested theories but curiosity not yet due, pick any theory
-            # This prevents getting stuck in curiosity mode when all theories are exhausted
-            all_theories = self.world_model.get_all_theories()
-            if all_theories:
-                # Pick the lowest-confidence theory for re-validation
-                theory = min(all_theories, key=lambda t: (t.confidence_score, t.predictive_success_rate))
         return theory, None
 
     async def run_cycle(self) -> EpistemicCycleResult:
         async with self._write_lock:
-            theory, curiosity_topic = self._select_focus()
+            theory, curiosity_topic = await asyncio.to_thread(self._select_focus)
         if theory is None:
             observation = await self.explorer.explore(None, curiosity_topic=curiosity_topic)
             faux_theory = Theory(
@@ -98,12 +89,9 @@ class EpistemicLoop:
                 text=f"We currently lack a reliable model of {curiosity_topic}.",
             )
             prediction_error = await self.analyzer.analyze(faux_theory, observation)
-            if not prediction_error.new_hypothesis and observation.sensor_data.strip():
-                prediction_error.new_hypothesis = (
-                    f"Observation about {curiosity_topic}: {observation.sensor_data[:240].strip()}"
-                )
             async with self._write_lock:
-                optimization = self.optimizer.optimize(
+                optimization = await asyncio.to_thread(
+                    self.optimizer.optimize,
                     faux_theory,
                     observation,
                     prediction_error,
@@ -118,10 +106,12 @@ class EpistemicLoop:
                 prediction_error=prediction_error,
                 optimization=optimization,
             )
-        observation = await self.explorer.explore(theory)
+        context = await asyncio.to_thread(self.world_model.get_theory_context, theory.id)
+        observation = await self.explorer.explore(theory, context=json.dumps(context))
         prediction_error = await self.analyzer.analyze(theory, observation)
         async with self._write_lock:
-            optimization = self.optimizer.optimize(
+            optimization = await asyncio.to_thread(
+                self.optimizer.optimize,
                 theory,
                 observation,
                 prediction_error,
@@ -139,7 +129,12 @@ class EpistemicLoop:
 
     async def run_forever(self) -> None:
         while True:
-            result = await self.run_cycle()
+            try:
+                result = await self.run_cycle()
+            except Exception as exc:
+                print(f"[EpistemicLoop] cycle failed: {exc}")
+                await asyncio.sleep(max(2.0, self.pause_seconds))
+                continue
             # Enhanced logging with more diagnostics
             log_msg = (
                 f"[EpistemicLoop] {result.mode:8} | "
@@ -147,19 +142,14 @@ class EpistemicLoop:
                 f"match: {result.prediction_error.match} | "
                 f"ok: {result.observation.ok}"
             )
-            # Add confidence info if theory mode
-            if result.mode == "theory" and result.theory_id:
-                theory = self.world_model.get_theory(result.theory_id)
-                if theory:
-                    log_msg += f" | conf: {theory.confidence_score:.2f} | attempts: {theory.attempts}"
             print(log_msg)
             
             # Log if observation failed
             if not result.observation.ok:
                 print(f"  ⚠️  Observation failed: {result.observation.sensor_data[:100]}")
             
-            # Log if match failed
-            if not result.prediction_error.match:
+            # Inconclusive evidence is not a prediction mismatch.
+            if result.prediction_error.verdict == "contradicts":
                 print(f"  ⚠️  Prediction mismatch: {result.prediction_error.reasoning[:100]}")
             
             if self.pause_seconds > 0:

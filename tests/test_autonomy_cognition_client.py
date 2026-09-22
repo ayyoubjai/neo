@@ -47,7 +47,9 @@ class _FakeSession:
     async def close(self) -> None:
         self.closed = True
 
-    async def submit_turn(self, text: str, *, requested_mode=None, turn_id=None) -> str:
+    async def submit_turn(self, text: str, *, requested_mode=None, turn_id=None, skip_distillation=False, autonomy_constraints=None) -> str:
+        self.constraints = autonomy_constraints
+        self.skip_distillation = skip_distillation
         self.submissions.append((text, requested_mode))
         return "turn-1"
 
@@ -58,7 +60,7 @@ class _FakeSession:
             await self._on_permission_request(permission)
         await asyncio.sleep(0)
         if self._on_assistant_final is not None:
-            await self._on_assistant_final({"text": self.payload["text"], "turn_id": "turn-1"})
+            await self._on_assistant_final({"text": self.payload["text"], "turn_id": "turn-1", "tool_evidence": self.payload.get("tool_evidence", [])})
 
     async def send_permission_decision(self, request_id: str, approved: bool) -> bool:
         self.decisions.append((request_id, approved))

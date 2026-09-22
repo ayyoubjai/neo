@@ -3,7 +3,7 @@
 
 Without flags this script only reports what is available. `--install` creates
 the project's `.venv` and installs Python requirements; it uses `npm ci` when
-Node is available, but never installs Docker, llama.cpp, llama-swap, drivers,
+Node is available, but never installs Docker, llama.cpp, llama-router, drivers,
 or operating-system packages on the user's behalf.
 """
 
@@ -51,7 +51,7 @@ def _print_status() -> None:
     print(f"Repository: {ROOT}")
     print(f"Python: {sys.executable} ({sys.version.split()[0]})")
     print(f"Virtual environment: {_venv_python() if _venv_python().exists() else 'not created'}")
-    for command in ("git", "node", "npm", "docker", "llama-server", "llama-swap", "ffmpeg"):
+    for command in ("git", "node", "npm", "docker", "llama-server", "llama-router", "ffmpeg"):
         print(f"{command}: {_command_status(command)}")
     node_major = _node_major()
     if node_major is not None:

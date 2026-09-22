@@ -543,7 +543,7 @@ async def _run_pipeline_once(config: EvolveSchedulerConfig, reason: str) -> int:
     return returncode
 
 
-async def serve(settings_path: str = DEFAULT_SETTINGS_PATH) -> int:
+async def serve(settings_path: str = None) -> int:
     config = build_scheduler_config(load_settings(settings_path))
     if not scheduler_should_start(config):
         return 0

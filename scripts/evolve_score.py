@@ -1145,8 +1145,8 @@ def main() -> int:
     parser.add_argument("--micro-force-regenerate", dest="llm_force_regenerate", action="store_true")
     parser.add_argument("--llm-max-cases", dest="llm_max_cases", type=int, default=8)
     parser.add_argument("--micro-max-cases", dest="llm_max_cases", type=int)
-    parser.add_argument("--llm-provider", dest="llm_provider", default="auto", choices=["auto", "ollama", "hf"])
-    parser.add_argument("--micro-provider", dest="llm_provider", choices=["auto", "ollama", "hf"])
+    parser.add_argument("--llm-provider", dest="llm_provider", default="auto", choices=["auto", "ollama", "hf", "llamacpp"])
+    parser.add_argument("--micro-provider", dest="llm_provider", choices=["auto", "ollama", "hf", "llamacpp"])
     parser.add_argument("--llm-model", dest="llm_model", default="")
     parser.add_argument("--micro-model", dest="llm_model")
     parser.add_argument("--llm-temperature", dest="llm_temperature", type=float, default=0.1)
@@ -1204,11 +1204,10 @@ def main() -> int:
     }
 
     if target_analysis.skip_macro:
-        return _emit(
-            0.5,
-            f"macro_skipped:{target_analysis.reason}",
-            True,
-            extra={
+        return _neutral_or_fail(
+            args.missing_source_policy,
+            f"behavioral_target_unavailable:{target_analysis.reason}",
+            {
                 "mode": mode,
                 "macro_policy": args.macro_policy,
                 "object_ids": object_ids,
@@ -1219,6 +1218,97 @@ def main() -> int:
         )
 
     if args.prepare_only:
+        micro_preparation: Dict[str, Any] = {}
+        if mode in {"micro", "hybrid"}:
+            llm_path = _resolve_data_path(
+                args.llm_scenarios_file,
+                repo_root=repo_root,
+                run_dir=run_dir,
+                prefer_repo=True,
+            )
+            if args.llm_force_regenerate and os.path.exists(llm_path):
+                try:
+                    os.unlink(llm_path)
+                except OSError as e:
+                    return _neutral_or_fail(
+                        args.missing_source_policy,
+                        f"micro_prepare_unlink_failed:{e}",
+                        {
+                            "mode": mode,
+                            "object_ids": object_ids,
+                            "target_analysis": analysis_payload,
+                            "micro_scenarios_file": llm_path,
+                        },
+                    )
+            if (args.llm_autogenerate and not os.path.exists(llm_path)) or args.llm_force_regenerate:
+                os.makedirs(os.path.dirname(llm_path), exist_ok=True)
+                gen_error = _autogenerate_llm_scenarios(
+                    repo_root=repo_root,
+                    target_rel=target_rel,
+                    target_start_line=int(args.target_start_line),
+                    target_end_line=int(args.target_end_line),
+                    object_ids=object_ids,
+                    output_path=llm_path,
+                    max_cases=max(1, int(args.llm_max_cases)),
+                    provider=str(args.llm_provider),
+                    model=str(args.llm_model),
+                    temperature=float(args.llm_temperature),
+                    max_new_tokens=max(32, int(args.llm_max_new_tokens)),
+                    enable_thinking=bool(args.llm_enable_thinking),
+                    timeout_s=max(1, int(args.llm_timeout_s)),
+                )
+                if gen_error:
+                    return _neutral_or_fail(
+                        args.missing_source_policy,
+                        f"micro_prepare_failed:{gen_error}",
+                        {
+                            "mode": mode,
+                            "object_ids": object_ids,
+                            "target_analysis": analysis_payload,
+                            "micro_scenarios_file": llm_path,
+                        },
+                    )
+            prepared_cases, prepared_total = _read_llm_cases(
+                scenarios_path=llm_path,
+                object_ids=object_ids,
+                limit=max(1, int(args.llm_sample_limit)),
+            )
+            min_cases_required = max(1, int(args.min_cases))
+            if len(prepared_cases) < min_cases_required:
+                return _neutral_or_fail(
+                    args.missing_source_policy,
+                    f"micro_preparation_insufficient:{len(prepared_cases)}<{min_cases_required}",
+                    {
+                        "mode": mode,
+                        "object_ids": object_ids,
+                        "target_analysis": analysis_payload,
+                        "micro_scenarios_file": llm_path,
+                        "required_cases": min_cases_required,
+                        "seen_cases": len(prepared_cases),
+                        "total_cases": prepared_total,
+                    },
+                )
+            micro_preparation = {
+                "micro_scenarios_file": llm_path,
+                "micro_cases": len(prepared_cases),
+                "micro_total_cases": prepared_total,
+            }
+
+        if mode == "micro":
+            return _emit(
+                1.0,
+                "prepare_ok",
+                True,
+                extra={
+                    "mode": mode,
+                    "macro_policy": args.macro_policy,
+                    "object_ids": object_ids,
+                    "target_analysis": analysis_payload,
+                    "status": "prepare_ok",
+                    **micro_preparation,
+                },
+            )
+
         if mode not in {"macro", "hybrid"}:
             return _emit(
                 1.0,
@@ -1311,6 +1401,7 @@ def main() -> int:
                     "details": injection_result.details,
                 },
                 "status": "prepare_ok",
+                **micro_preparation,
             },
         )
 

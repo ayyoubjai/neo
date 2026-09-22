@@ -17,7 +17,7 @@ from adaptive_agent.gene_catalog import Gene
 from adaptive_agent.materializer import bundle_ids_for_profile, materialize_profile, pack_dna
 from adaptive_agent.purpose import infer_purpose
 from adaptive_agent.resolver import PurposeProfile, resolve_genes
-from adaptive_agent.runner import build_llama_swap_command, build_llamacpp_command, build_model_server_command
+from adaptive_agent.runner import build_llama_router_command, build_llamacpp_command, build_model_server_command
 from adaptive_agent.settings_apply import apply_profile_settings
 from adaptive_agent.wizard import build_profile
 
@@ -107,25 +107,25 @@ class AdaptiveAgentTests(unittest.TestCase):
             ["llama-server", "-m", "models/test.gguf", "-c", "2048", "-t", "2", "--port", "8081"],
         )
 
-    def test_runner_builds_llama_swap_command_for_service_gene(self) -> None:
+    def test_runner_builds_llama_router_command_for_service_gene(self) -> None:
         profile = {
             "services": [
                 {
-                    "id": "service.model.llama_swap",
+                    "id": "service.model.llama_router",
                     "payload": {
-                        "server_kind": "llama_swap",
-                        "binary": "llama-swap",
-                        "config_path": "config/config.yaml",
+                        "server_kind": "llama_router",
+                        "binary": "llama-router",
+                        "config_path": "config/llama-router.local.yaml",
                         "listen": "localhost:8080",
                     },
                 }
             ]
         }
         self.assertEqual(
-            build_llama_swap_command(profile),
-            ["llama-swap", "--config", "config/config.yaml", "--listen", "localhost:8080"],
+            build_llama_router_command(profile),
+            ["llama-router", "--config", "config/llama-router.local.yaml", "--listen", "localhost:8080"],
         )
-        self.assertEqual(build_model_server_command(profile)[0], "llama-swap")
+        self.assertEqual(build_model_server_command(profile)[0], "llama-router")
 
     def test_infer_purpose_from_free_form_goal(self) -> None:
         self.assertEqual(infer_purpose("run on my phone in termux"), "phone_companion")
@@ -145,12 +145,12 @@ class AdaptiveAgentTests(unittest.TestCase):
             "cognition": {"payload": {"bundles": ["cognition_basic"]}},
             "model": {"payload": {"bundles": ["model_runtime"]}},
             "tools": [{"payload": {"bundles": ["tool_runtime_basic"]}}],
-            "services": [{"payload": {"bundles": ["llama_swap"]}}],
+            "services": [{"payload": {"bundles": ["llama_router"]}}],
             "prompts": [{"payload": {"bundles": ["prompts"]}}],
         }
         self.assertEqual(
             bundle_ids_for_profile(profile),
-            ["core", "model_runtime", "cognition_basic", "tool_runtime_basic", "llama_swap", "prompts"],
+            ["core", "model_runtime", "cognition_basic", "tool_runtime_basic", "llama_router", "prompts"],
         )
 
     def test_apply_profile_settings_merges_cognition_patch(self) -> None:

@@ -15,7 +15,14 @@
   },
   "models": {
     "provider": "llamacpp",
+    "models_dir": "./models",
     "llamacpp_host": "http://127.0.0.1:8080",
+    "router_max_models": 1,
+    "serialize_model_requests": true,
+    "model_queue_timeout_s": 600,
+    "model_context_size": 8192,
+    "embedding_host": "http://127.0.0.1:8082",
+    "embedding_threads": 4,
     "llamacpp_timeout_s": 600,
     "ollama_host": "http://127.0.0.1:11434",
     "ollama_timeout_s": 600,
@@ -24,6 +31,11 @@
     "text_model_options": {"temperature": 0.2},
     "vision_model": "",
     "vision_model_options": {},
+    "ui_grounding_model": "",
+    "ui_grounding_enforce_json": true,
+    "ui_grounding_disable_thinking": true,
+    "ui_grounding_model_options": {},
+    "vision_image_min_tokens": 1024,
     "embedding_model": "nomic-embed-text-v1.5-q4_k_m.gguf",
     "text_enforce_json": false,
     "text_use_thinking_on_empty": true
@@ -34,7 +46,10 @@
     "retrieve_relevant_tools": true,
     "select_relevant_tools": false,
     "tool_retrieval_k": 8,
+    "tool_retrieval_min_similarity": 0.3,
     "memory_retrieval_k": 3,
+    "cognition_system0_enabled": true,
+    "cognition_context_sources": "both",
     "cognition_force_system": "",
     "cognition_system0_model": "qwen2.5-3b-instruct-q4_k_m.gguf",
     "cognition_system0_options": {"thinking": false},
@@ -50,24 +65,32 @@
     "cognition_repair_options": {"thinking": false},
     "cognition_judge_model": "qwen2.5-7b-instruct-q4_k_m.gguf",
     "cognition_judge_options": {"thinking": false},
-    "cognition_distill_enabled": false,
+    "cognition_distill_enabled": true,
     "cognition_system3_enabled": false,
+    "cognition_system3_safety_threshold": 7.0,
+    "cognition_system3_review_quorum": 2,
     "cognition_system0_max_steps": 1,
     "cognition_system1_max_steps": 4,
-    "cognition_system2_max_steps": 3
+    "cognition_system2_max_steps": 3,
+    "cognition_max_segments": 3,
+    "cognition_max_model_calls": 60,
+    "cognition_timeout_s": 300,
+    "final_response_critic_enabled": true,
+    "final_response_critic_max_retries": 1,
+    "create_tool_blocked_modules": [],
+    "create_tool_blocked_calls": [],
+    "create_tool_dependency_timeout_s": 120
   },
   "tool": {
     "active_tool_limit": 100,
     "planner_tool_profile": "initial",
     "planner_dynamic_activation_enabled": true,
-    "planner_activation_ttl_s": 5.0,
-    "planner_hide_duplicate_ui_tools": true,
-    "planner_show_embodiment_fallback_tools": false,
-    "application_catalog_path": "./config/app_launchers.json"
+    "planner_activation_ttl_s": 5.0
   },
   "search": {
     "provider": "searxng",
     "searxng_url": "http://127.0.0.1:8081",
+    "safe_search": 1,
     "timeout_s": 20
   },
   "telegram": {
@@ -117,7 +140,24 @@
     "transcription_enabled": true,
     "ffmpeg_binary": "ffmpeg"
   },
-  "google": {},
+  "google": {
+    "enabled": false,
+    "oauth_client_source": "skip",
+    "auto_google_authorize": false
+  },
   "evolve": {},
-  "autonomy": {"enabled": false}
+  "autonomy": {
+    "enabled": false,
+    "knowledge_enabled": false,
+    "knowledge_worker": {
+      "collection": "library",
+      "pause_s": 60,
+      "max_plans_per_day": 4,
+      "max_investigations_per_day": 4,
+      "max_tool_calls_per_day": 12,
+      "max_actions_per_investigation": 3,
+      "reassess_after_days": 30,
+      "objective": ""
+    }
+  }
 }

@@ -4,6 +4,8 @@ This release runs locally and keeps credentials, model paths, sessions, and
 conversation data outside version control. The guided setup creates ignored
 machine-local files; do not edit the tracked examples for a personal install.
 
+This project uses llama.cpp in router mode via llama-router.
+
 ## 1. Install the application dependencies
 
 Fastest first run (Linux or Windows):
@@ -14,7 +16,7 @@ python scripts/bootstrap_release.py --install
 
 This creates a project-local virtual environment and installs requirements. It
 uses `npm ci` when Node is available, but it does not install operating-system
-software, GPU drivers, Docker, llama.cpp, or llama-swap for you. Check what is
+software, GPU drivers, Docker, llama.cpp, or llama-router for you. Check what is
 available without changing anything with:
 
 ```bash
@@ -24,8 +26,8 @@ python scripts/bootstrap_release.py
 Linux/macOS:
 
 ```bash
-git clone https://github.com/<your-account>/AGI.git
-cd AGI
+git clone https://github.com/ayyoubjai/neo.git
+cd neo
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -36,8 +38,8 @@ npm ci
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/<your-account>/AGI.git
-Set-Location AGI
+git clone https://github.com/ayyoubjai/neo.git
+Set-Location neo
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -70,7 +72,7 @@ It asks for the backend, interface(s), cognition model allocation, optional
 vision model, and llama.cpp paths. Use the non-interactive commands below when
 you want a reproducible installation script.
 
-### Recommended: llama.cpp + llama-swap
+### Recommended: llama.cpp + llama-router
 
 Build or install `llama-server` with the hardware backend you need. For a CUDA
 build on Linux:
@@ -81,12 +83,22 @@ cmake -S llama.cpp -B llama.cpp/build -DGGML_CUDA=ON
 cmake --build llama.cpp/build --config Release -j
 ```
 
-Install `llama-swap` from its release binary, package manager, or source. On
-Windows, its documented package-manager command is:
+Install `llama-router` from its release binary, package manager, or source.
 
-```powershell
-winget install llama-swap
+`start.sh` uses the executable saved by setup's `--llama-server` option in
+`models.llama_server`. For an existing installation, set that key in
+`config/settings.local.json`, add the binary directory to `PATH`, or override
+the executable for one launch:
+
+```bash
+LLAMA_SERVER_BIN=/absolute/path/to/llama.cpp/build/bin/llama-server ./start.sh
 ```
+
+Generating `config/models.ini` does not install the server executable.
+If Docker reports `permission denied` on its socket, follow Docker's
+[Linux post-installation steps](https://docs.docker.com/engine/install/linux-postinstall/)
+to configure access and log out and back in before retrying `docker ps`.
+Membership in the `docker` group grants root-level privileges.
 
 Place your downloaded GGUF files in one directory. Then create local
 configuration, assigning a fast model to routing/System 0 and a larger model to
@@ -94,7 +106,7 @@ Systems 1–2:
 
 ```bash
 python scripts/setup_release.py \
-  --provider llamaswap \
+  --provider llama-router \
   --model-dir /absolute/path/to/models \
   --llama-server /absolute/path/to/llama-server \
   --fast-model qwen2.5-3b-instruct-q4_k_m.gguf \
@@ -107,7 +119,7 @@ For a vision-language model, pass its model GGUF and matching `mmproj` file:
 
 ```bash
 python scripts/setup_release.py \
-  --provider llamaswap \
+  --provider llama-router \
   --model-dir /absolute/path/to/models \
   --llama-server /absolute/path/to/llama-server \
   --fast-model qwen2.5-3b-instruct-q4_k_m.gguf \
@@ -118,24 +130,28 @@ python scripts/setup_release.py \
   --interfaces local --local-senses text,vision --force
 ```
 
-Start llama-swap in one terminal, then keep it running:
+You can start the model server manually or let the project start it for you.
+
+Manual start (recommended for debugging):
 
 ```bash
-llama-swap --config config/llama-swap.local.yaml --listen 127.0.0.1:8080
+llama-server --models-dir /absolute/path/to/models --host 127.0.0.1 --port 8080
 ```
 
-For PowerShell, use backticks for line continuations and quote Windows paths:
+PowerShell example (quote Windows paths as needed):
 
 ```powershell
-python scripts/setup_release.py --provider llamaswap --model-dir "C:\AI\models" --llama-server "C:\AI\llama.cpp\build\bin\Release\llama-server.exe" --fast-model "qwen2.5-3b-instruct-q4_k_m.gguf" --reasoning-model "qwen2.5-7b-instruct-q4_k_m.gguf" --embedding-model "nomic-embed-text-v1.5-q4_k_m.gguf" --interfaces telegram,whatsapp
-llama-swap --config config/llama-swap.local.yaml --listen 127.0.0.1:8080
+python scripts/setup_release.py --provider llama-router --model-dir "C:\AI\models" --llama-server "C:\AI\llama.cpp\build\bin\Release\llama-server.exe" --fast-model "qwen2.5-3b-instruct-q4_k_m.gguf" --reasoning-model "qwen2.5-7b-instruct-q4_k_m.gguf" --embedding-model "nomic-embed-text-v1.5-q4_k_m.gguf" --interfaces telegram,whatsapp
+llama-server --models-dir C:\AI\models --host 127.0.0.1 --port 8080
 ```
 
 `--vision-model` and `--vision-mmproj` may include paths relative to
-`--model-dir`; the filename itself becomes the model ID. The generated files are `config/settings.local.json` and
-`config/llama-swap.local.yaml`. Change the `cognition_*_model` values in the
-former whenever you want a different cognition allocation. Model IDs must be
-identical in both files.
+`--model-dir`; the filename itself becomes the model ID. The setup wizard now
+records the selected `models` directory in `config/settings.local.json` under
+`models.models_dir`. Change the `cognition_*_model` values in
+`config/settings.local.json` whenever you want a different cognition allocation.
+Model IDs used by the client must match the preset names exposed by
+`llama-server` (not the GGUF filenames with suffixes).
 
 ### Alternative: Ollama
 
@@ -156,7 +172,7 @@ analysis from Telegram, WhatsApp, or the visual tools.
 
 ## 3. Start local web search
 
-SearXNG is private by default and deliberately uses port `8081`; llama-swap
+SearXNG is locally hosted and deliberately uses port `8081`; llama-router
 uses `8080`.
 
 ```bash
@@ -167,6 +183,16 @@ curl --fail "http://127.0.0.1:8081/search?q=local+llm&format=json"
 The assistant uses it through the permission-gated `net.search` tool. Do not
 publish this container directly to the Internet. If you expose it beyond the
 host, add a reverse proxy, authentication, TLS, and rate limiting.
+
+Setup displays a web-search privacy notice: local SearXNG still sends queries
+to upstream engines, which can see your public IP address. Firewall changes
+are never applied by setup or startup. The optional, default-no firewall-plan
+prompt writes `config/firewall.local.nft` for review only. It requires explicit
+bridge, uplink, and subnet values and an existing Linux `inet filter forward`
+chain. The displayed rules allow HTTP/HTTPS for all containers on that bridge
+and subnet, plus replies. Applying the displayed administrator command is a
+separate decision; boot-time persistence is also separate. Setup prints rollback
+instructions using the rule handles. The generated plan is ignored by Git.
 
 ## 4. Enable messaging
 

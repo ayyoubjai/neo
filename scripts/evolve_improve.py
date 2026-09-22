@@ -523,6 +523,13 @@ def _slug_for_branch(value: str) -> str:
     return collapsed or "candidate"
 
 
+def _target_evidence_key(target: Target) -> str:
+    identity = f"{target.path}:{target.start_line}:{target.end_line}"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", target.path.replace("\\", "/")).strip("-")
+    return f"{stem[:48] or 'target'}-{digest}"
+
+
 def _prepare_evolution_repo(
     source_root: str,
     evolution_repo_root: str,
@@ -552,6 +559,25 @@ def _prepare_evolution_repo(
 
     baseline_ref = _run_git(["rev-parse", "HEAD"], evolution_repo_root).stdout.strip()
     return evolution_repo_root, baseline_ref
+
+
+def _commit_prepared_evolution_baseline(evolution_repo_root: str, run_id: str) -> str:
+    """Commit preparation artifacts so every candidate starts from one exact tree."""
+    _run_git(["add", "-A"], evolution_repo_root)
+    status = _run_git(["status", "--porcelain", "--untracked-files=all"], evolution_repo_root).stdout.strip()
+    if status:
+        _run_git(["commit", "-m", f"prepared baseline {run_id}"], evolution_repo_root)
+    return _run_git(["rev-parse", "HEAD"], evolution_repo_root).stdout.strip()
+
+
+def _assert_evolution_baseline_immutable(evolution_repo_root: str, baseline_ref: str) -> None:
+    if not baseline_ref:
+        raise RuntimeError("evolution baseline ref is missing")
+    current_ref = _run_git(["rev-parse", "HEAD"], evolution_repo_root).stdout.strip()
+    status = _run_git(["status", "--porcelain", "--untracked-files=all"], evolution_repo_root).stdout.strip()
+    if current_ref != baseline_ref or status:
+        detail = status.splitlines()[0] if status else f"HEAD={current_ref}"
+        raise RuntimeError(f"prepared evolution baseline changed after finalization: {detail}")
 
 
 def _create_candidate_worktree(
@@ -889,11 +915,11 @@ def _copy_or_link(src: str, dst: str) -> None:
     _safe_copy2(src, dst)
 
 
-def _copy_repo_with_mode(run_dir: str, ignore: List[str], copy_mode: str) -> None:
+def _copy_repo_with_mode(source_root: str, run_dir: str, ignore: List[str], copy_mode: str) -> None:
     normalized = _normalize_ignore_patterns(ignore)
 
     def _ignore(current_dir: str, names: List[str]) -> List[str]:
-        rel_dir = os.path.relpath(current_dir, REPO_ROOT)
+        rel_dir = os.path.relpath(current_dir, source_root)
         rel_dir = "" if rel_dir in (".", "") else rel_dir
         ignored: List[str] = []
         for entry in names:
@@ -903,7 +929,7 @@ def _copy_repo_with_mode(run_dir: str, ignore: List[str], copy_mode: str) -> Non
         return ignored
 
     _ = copy_mode
-    shutil.copytree(REPO_ROOT, run_dir, ignore=_ignore, copy_function=_safe_copy2)
+    shutil.copytree(source_root, run_dir, ignore=_ignore, copy_function=_safe_copy2)
 
 
 def _score_candidate(metric_results: List[MetricResult], weights: Dict[str, float]) -> float:
@@ -1084,6 +1110,7 @@ def _run_required_preflight(
             target_path=target.path,
             target_start_line=target.start_line,
             target_end_line=target.end_line,
+            target_key=_target_evidence_key(target),
             run_dir=repo_root,
             repo_root=repo_root,
             generation=0,
@@ -1111,10 +1138,22 @@ def _run_required_preflight(
         if proc.returncode != 0:
             detail = proc.stderr.strip() or proc.stdout.strip() or f"returncode={proc.returncode}"
             return f"{name} preflight failed: {detail}"
+        if bool(metric.get("parse_json", False)):
+            if not proc.stdout.strip():
+                return f"{name} preflight failed: missing JSON output"
+            try:
+                parsed = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                return f"{name} preflight failed: invalid JSON output"
+            if not isinstance(parsed, dict) or "score" not in parsed:
+                return f"{name} preflight failed: JSON output missing score"
+            status = str(parsed.get("status", "") or "").strip().lower() if isinstance(parsed, dict) else ""
+            if status in {"neutral_fallback", "macro_skipped", "missing_evidence", "source_missing"}:
+                return f"{name} preflight failed: required evidence unavailable ({status})"
     return None
 
 
-def _run_macro_prepare_once(
+def _run_evidence_prepare_once(
     metrics_cfg: List[Dict[str, Any]],
     target: Target,
     default_timeout_s: int,
@@ -1134,6 +1173,7 @@ def _run_macro_prepare_once(
             target_path=target.path,
             target_start_line=target.start_line,
             target_end_line=target.end_line,
+            target_key=_target_evidence_key(target),
             run_dir=repo_root,
             repo_root=repo_root,
             generation=0,
@@ -1513,6 +1553,7 @@ def _evaluate_candidates(
     benchmark_baseline_cache: Dict[str, Dict[str, Any]] = {}
     for idx, candidate in enumerate(candidates, start=1):
         _assert_tree_unchanged(source_guard_root, source_guard_fingerprint, "main source tree")
+        _assert_evolution_baseline_immutable(execution_repo_root, execution_baseline_ref)
         if not isinstance(candidate, dict):
             continue
         raw_id = str(candidate.get("id") or f"candidate_{idx}")
@@ -1528,7 +1569,7 @@ def _evaluate_candidates(
                     run_candidate_id=run_candidate_id,
                 )
             else:
-                _copy_repo_with_mode(candidate_dir, copy_ignore, copy_mode=copy_mode)
+                _copy_repo_with_mode(execution_repo_root, candidate_dir, copy_ignore, copy_mode=copy_mode)
             _apply_candidate(candidate_dir, candidate)
         except Exception as e:
             candidate_reports.append(
@@ -1607,6 +1648,7 @@ def _evaluate_candidates(
                     target_path=target.path,
                     target_start_line=target.start_line,
                     target_end_line=target.end_line,
+                    target_key=_target_evidence_key(target),
                     run_dir=execution_repo_root,
                     repo_root=execution_repo_root,
                     generation=0,
@@ -1616,6 +1658,7 @@ def _evaluate_candidates(
                     target_path=target.path,
                     target_start_line=target.start_line,
                     target_end_line=target.end_line,
+                    target_key=_target_evidence_key(target),
                     run_dir=candidate_dir,
                     repo_root=execution_repo_root,
                     generation=generation_index,
@@ -1705,6 +1748,7 @@ def _evaluate_candidates(
                 target_path=target.path,
                 target_start_line=target.start_line,
                 target_end_line=target.end_line,
+                target_key=_target_evidence_key(target),
                 run_dir=candidate_dir,
                 repo_root=execution_repo_root,
                 generation=generation_index,
@@ -1725,29 +1769,43 @@ def _evaluate_candidates(
                 if required:
                     rejected = True
                 continue
-            score = 1.0 if proc.returncode == 0 else 0.0
+            metric_passed = proc.returncode == 0
+            score = 1.0 if metric_passed else 0.0
             details = ""
-            if parse_json and proc.stdout:
-                try:
-                    parsed = json.loads(proc.stdout)
-                    if isinstance(parsed, dict) and "score" in parsed:
-                        score = float(parsed.get("score", score))
-                        details = str(parsed.get("details", "")) if parsed.get("details") else ""
-                        metric_status = str(parsed.get("status", "") or "").strip().lower()
-                        if metric_status in {"neutral_fallback", "macro_skipped"}:
-                            neutral_cap = _float_with_default(metric.get("neutral_score_cap"), 0.25)
-                            score = min(score, neutral_cap)
-                            if details:
-                                details = f"{details}; neutral_score_cap={neutral_cap:.2f}"
-                            else:
-                                details = f"neutral_score_cap={neutral_cap:.2f}"
-                except json.JSONDecodeError:
-                    details = "invalid JSON output"
+            if parse_json:
+                if not proc.stdout.strip():
+                    details = "missing JSON output"
+                    if required:
+                        metric_passed = False
+                else:
+                    try:
+                        parsed = json.loads(proc.stdout)
+                        if isinstance(parsed, dict) and "score" in parsed:
+                            score = float(parsed.get("score", score))
+                            details = str(parsed.get("details", "")) if parsed.get("details") else ""
+                            metric_status = str(parsed.get("status", "") or "").strip().lower()
+                            if metric_status in {"neutral_fallback", "macro_skipped"}:
+                                neutral_cap = _float_with_default(metric.get("neutral_score_cap"), 0.25)
+                                score = min(score, neutral_cap)
+                                if required:
+                                    metric_passed = False
+                                if details:
+                                    details = f"{details}; neutral_score_cap={neutral_cap:.2f}"
+                                else:
+                                    details = f"neutral_score_cap={neutral_cap:.2f}"
+                        else:
+                            details = "JSON output missing score"
+                            if required:
+                                metric_passed = False
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        details = "invalid JSON output"
+                        if required:
+                            metric_passed = False
             metric_results.append(
                 MetricResult(
                     name=name,
                     score=score,
-                    passed=proc.returncode == 0,
+                    passed=metric_passed,
                     required=required,
                     details=details,
                     raw_stdout=proc.stdout[-2000:],
@@ -1755,7 +1813,7 @@ def _evaluate_candidates(
                     returncode=proc.returncode,
                 )
             )
-            if required and proc.returncode != 0:
+            if required and not metric_passed:
                 rejected = True
 
         score = _score_candidate(metric_results, metrics_weights)
@@ -1773,6 +1831,7 @@ def _evaluate_candidates(
             "change_summary": change_summary,
         }
         _assert_tree_unchanged(source_guard_root, source_guard_fingerprint, "main source tree")
+        _assert_evolution_baseline_immutable(execution_repo_root, execution_baseline_ref)
         candidate_reports.append(candidate_report)
     return candidate_reports
 
@@ -1904,7 +1963,7 @@ def main() -> int:
     os.makedirs(run_root, exist_ok=True)
     execution_repo_root = REPO_ROOT
     execution_baseline_ref = ""
-    if execution_backend == "git_worktree" and not args.dry_run:
+    if not args.dry_run:
         execution_repo_root = (
             execution_repo_dir_cfg
             if os.path.isabs(execution_repo_dir_cfg)
@@ -1962,29 +2021,41 @@ def main() -> int:
             f"targets={autonomous_info.get('target_count', 0)}"
         )
 
+    if not args.dry_run:
+        # Preparation may inject trace decorators or generate target-specific
+        # scenarios. Finish all such writes before the candidate baseline is
+        # finalized, then verify required evidence against that same tree.
+        for target in targets:
+            evidence_prepare_error = _run_evidence_prepare_once(
+                metrics_cfg=metrics_cfg,
+                target=target,
+                default_timeout_s=generator_timeout,
+                repo_root=execution_repo_root,
+            )
+            if evidence_prepare_error:
+                print(f"[error] evidence prepare failed for {target.path}: {evidence_prepare_error}")
+                return 2
+        if profile_enabled and profile_preflight:
+            for target in targets:
+                preflight_error = _run_required_preflight(
+                    metrics_cfg=metrics_cfg,
+                    target=target,
+                    default_timeout_s=generator_timeout,
+                    repo_root=execution_repo_root,
+                )
+                if preflight_error:
+                    print(f"[error] baseline preflight failed for {target.path}: {preflight_error}")
+                    return 2
+        try:
+            execution_baseline_ref = _commit_prepared_evolution_baseline(execution_repo_root, run_id)
+            _assert_evolution_baseline_immutable(execution_repo_root, execution_baseline_ref)
+        except Exception as e:
+            print(f"[error] failed to finalize prepared evolution baseline: {e}")
+            return 2
+
     for target in targets:
         target_info = _read_target(target)
         seen_candidate_signatures: set[str] = set()
-        if profile_enabled and profile_preflight and not args.dry_run:
-            preflight_error = _run_required_preflight(
-                metrics_cfg=metrics_cfg,
-                target=target,
-                default_timeout_s=generator_timeout,
-                repo_root=execution_repo_root,
-            )
-            if preflight_error:
-                print(f"[error] baseline preflight failed for {target.path}: {preflight_error}")
-                return 2
-        if not args.dry_run:
-            macro_prepare_error = _run_macro_prepare_once(
-                metrics_cfg=metrics_cfg,
-                target=target,
-                default_timeout_s=generator_timeout,
-                repo_root=execution_repo_root,
-            )
-            if macro_prepare_error:
-                print(f"[error] macro prepare failed for {target.path}: {macro_prepare_error}")
-                return 2
         base_payload = {
             "target": target_info,
             "objectives": {m.get("name"): m.get("weight", 0.0) for m in metrics_cfg if m.get("name")},

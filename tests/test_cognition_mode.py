@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -15,6 +15,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from model_server.router_model import _coerce_route
 from orchestrator.main import Orchestrator
+from common.config import load_settings
 
 
 class _FakeMemory:
@@ -57,6 +58,15 @@ class _FakeRetrievalMemory:
 
 
 class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        settings = load_settings()
+        settings.data_dir = directory.name
+        settings_patch = patch("orchestrator.main.load_settings", return_value=settings)
+        settings_patch.start()
+        self.addCleanup(settings_patch.stop)
+
     def test_normalize_model_call_options_keeps_thinking_and_reasoning_effort(self) -> None:
         orchestrator = Orchestrator.__new__(Orchestrator)
 
@@ -185,29 +195,112 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("COGNITION SYSTEM1", prompt)
         self.assertNotIn("Think quickly.", prompt)
-        self.assertNotIn("USER REQUEST:", prompt)
+        self.assertIn("USER REQUEST:", prompt)
+        self.assertIn("Analyze the mode.", prompt)
+        self.assertIn("Never ask the user to explain an intent", prompt)
         self.assertIn("CYCLE INDEX: 1", prompt)
         self.assertNotIn("REUSABLE SKILLS:", prompt)
         self.assertNotIn("PATTERNS:", prompt)
         self.assertNotIn("SAFETY RULES:", prompt)
 
-    def test_cognition_system0_prompt_mentions_fast_safe_path(self) -> None:
+    def test_system0_gate_accepts_final_or_escalate(self) -> None:
+        orchestrator = Orchestrator()
+
+        final = orchestrator._parse_cognition_system0_response(
+            '{"type":"final","thought":"simple","text":"done"}'
+        )
+        escalation = orchestrator._parse_cognition_system0_response(
+            '{"type":"escalate","thought":"needs work","reason":"multi-step"}'
+        )
+
+        self.assertEqual(final["type"], "final")
+        self.assertEqual(escalation["type"], "escalate")
+
+    async def test_run_cognition_loop_uses_one_system0_call_for_trivial_conversation(self) -> None:
+        orchestrator = Orchestrator()
+        orchestrator._cognition_distill_enabled = False
+        orchestrator._retrieve_relevant_tools = AsyncMock(
+            side_effect=AssertionError("trivial fast path should skip tool retrieval")
+        )
+        orchestrator._generate_cognition_response = AsyncMock(
+            return_value='{"type":"final","thought":"greeting","text":"Hello!"}'
+        )
+
+        result = await orchestrator._run_cognition_loop(
+            "hello neo",
+            {"summary": "should not be used"},
+            "trace-trivial-fast",
+            "turn-trivial-fast",
+        )
+
+        self.assertEqual(result, "Hello!")
+        orchestrator._retrieve_relevant_tools.assert_not_awaited()
+        orchestrator._generate_cognition_response.assert_awaited_once()
+        prompt = orchestrator._generate_cognition_response.await_args.args[0]
+        self.assertIn("COGNITION SYSTEM0", prompt)
+        self.assertIn("USER REQUEST:", prompt)
+        evidence = orchestrator._get_turn_execution_evidence("turn-trivial-fast")
+        self.assertIsNotNone(evidence)
+        self.assertEqual(evidence["entity"]["thinking_mode"], "system0")
+
+    def test_cognition_system0_prompt_is_state_free(self) -> None:
         orchestrator = Orchestrator()
 
         prompt = orchestrator._build_cognition_system0_prompt(
-            orchestrator._default_cognition_query_state("What time?"),
-            orchestrator._default_cognition_state_of_mind(),
-            [],
-            cycle_index=1,
+            "What time?",
         )
 
         self.assertIn("COGNITION SYSTEM0", prompt)
-        self.assertIn("fastest safe path", prompt)
-        self.assertIn("CYCLE INDEX: 1", prompt)
+        self.assertIn("first-pass triage", prompt)
+        self.assertIn('"type":"escalate"', prompt)
+        self.assertIn('"mem_id":"system.object"', prompt)
+        self.assertIn('"name":"system"', prompt)
+        self.assertIn("CURRENT UTC DATETIME:", prompt)
+        self.assertIn("current information", prompt)
         self.assertNotIn("\"type\":\"clarify\"", prompt)
         self.assertNotIn("\"type\":\"act\"", prompt)
         self.assertNotIn("AVAILABLE TOOLS:", prompt)
+        self.assertNotIn("query_state", prompt)
+        self.assertNotIn("state_of_mind", prompt)
         self.assertNotIn("SPECIAL ORCHESTRATION ACTIONS:", prompt)
+
+    async def test_init_runs_only_after_system2_is_selected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = Orchestrator()
+            orchestrator._cognition_distill_enabled = False
+            orchestrator._cognition_query_state_enabled = True
+            orchestrator._cognition_state_of_mind_enabled = True
+            orchestrator._memory = _FakeRetrievalMemory()
+            orchestrator._retrieve_relevant_tools = AsyncMock(return_value=[])
+            orchestrator._load_cognition_skills = lambda: []
+            orchestrator._load_cognition_patterns = lambda: []
+            orchestrator._load_cognition_safety_rules = lambda: []
+            orchestrator._cognition_episodes_path = str(Path(tmp) / "episodes.jsonl")
+            orchestrator._generate_cognition_response = AsyncMock(
+                side_effect=[
+                    '{"type":"escalate","thought":"complex","reason":"needs reasoning"}',
+                    '{"type":"route","thinking_mode":"system2","reason":"multi-step"}',
+                    (
+                        '{"type":"init","thought":"initialized","tools_needed":false,'
+                        '"query_state":{"intent":"analyze"},'
+                        '"state_of_mind":{"stance":"focused","confidence":0.8}}'
+                    ),
+                    '{"type":"final","thought":"done","text":"complete"}',
+                ]
+            )
+
+            result = await orchestrator._run_cognition_loop(
+                "Analyze this complex task.",
+                {"summary": "context"},
+                "trace-init-after-route",
+                "turn-init-after-route",
+            )
+
+            self.assertEqual(result, "complete")
+            prompts = [call.args[0] for call in orchestrator._generate_cognition_response.await_args_list]
+            self.assertIn("COGNITION THINKING ROUTER", prompts[1])
+            self.assertIn("COGNITION INITIALIZER", prompts[2])
+            self.assertIn("COGNITION SYSTEM2", prompts[3])
 
     def test_cognition_system2_prompt_omits_catalog_sections(self) -> None:
         orchestrator = Orchestrator()
@@ -500,6 +593,66 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(parsed["text"], "Saved at workspace:/screenshot.png")
 
+    def test_parse_cognition_final_response_rejects_missing_or_empty_text(self) -> None:
+        orchestrator = Orchestrator()
+
+        missing = orchestrator._parse_cognition_thinking_response(
+            '{"type":"final","thought":"done"}',
+            allow_step=False,
+        )
+        empty = orchestrator._parse_cognition_thinking_response(
+            '{"type":"final","thought":"done","text":"   "}',
+            allow_step=False,
+        )
+
+        self.assertIsNone(missing)
+        self.assertIsNone(empty)
+
+    def test_parse_cognition_recovers_actions_mislabeled_as_final(self) -> None:
+        orchestrator = Orchestrator()
+
+        parsed = orchestrator._parse_cognition_thinking_response(
+            (
+                '{"type":"final","thought":"current schedule requires search",'
+                '"text":"Let me search for the match schedule.",'
+                '"actions":[{"tool_id":"net.search","args":'
+                '{"query":"Real Madrid match today opponent time schedule"}}]}'
+            ),
+            allow_step=False,
+        )
+
+        self.assertEqual(parsed["type"], "act")
+        self.assertEqual(parsed["actions"][0]["tool_id"], "net.search")
+        self.assertEqual(
+            parsed["actions"][0]["args"]["query"],
+            "Real Madrid match today opponent time schedule",
+        )
+
+    def test_parse_cognition_finalizer_rejects_mislabeled_actions(self) -> None:
+        orchestrator = Orchestrator()
+
+        parsed = orchestrator._parse_cognition_thinking_response(
+            (
+                '{"type":"final","text":"Let me search.",'
+                '"actions":[{"tool_id":"net.search","args":{"query":"schedule"}}]}'
+            ),
+            allow_step=False,
+            allow_actions=False,
+        )
+
+        self.assertIsNone(parsed)
+
+    def test_cognition_execution_prompts_forbid_tool_call_promises(self) -> None:
+        orchestrator = Orchestrator()
+
+        system1 = orchestrator._build_cognition_system1_prompt({}, {}, [], [], cycle_index=1)
+        system2 = orchestrator._build_cognition_system2_prompt(
+            "Find today's match.", {}, {}, [], [], [], cycle_index=1
+        )
+
+        self.assertIn("final response must answer", system1)
+        self.assertIn("final response must answer", system2)
+
     def test_cognition_result_payload_text_preserves_empty_final_schema(self) -> None:
         orchestrator = Orchestrator.__new__(Orchestrator)
 
@@ -608,6 +761,60 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Do not return final/clarify/act/step JSON", prompt)
         self.assertNotIn("\"trigger\":\"...\"", prompt)
 
+    def test_cognition_distill_prompt_includes_grounding_inputs(self) -> None:
+        orchestrator = Orchestrator()
+
+        prompt = orchestrator._build_cognition_distill_prompt(
+            "Read the file",
+            {"type": "final", "text": "file contents"},
+            {"query_rewrite": "read the file"},
+            {},
+            [],
+            [],
+            [{"tool_id": "fs.read_file", "name": "Read file", "description": "Read a file"}],
+            [],
+        )
+
+        self.assertIn("EXECUTION RESULT:", prompt)
+        self.assertIn('"text":"file contents"', prompt)
+        self.assertIn("fs.read_file", prompt)
+
+    def test_system3_winner_requires_safety_threshold_and_review_quorum(self) -> None:
+        orchestrator = Orchestrator()
+        orchestrator._cognition_system3_safety_threshold = 7.0
+        orchestrator._cognition_system3_review_quorum = 2
+        proposals = [{"peer_id": "prop_a", "recommended_mode": "system1"}]
+
+        self.assertIsNone(
+            orchestrator._select_cognition_system3_winner(
+                proposals,
+                [{"critic_id": "crit_a", "proposal_peer_id": "prop_a", "score": 9}],
+                "trace-quorum",
+            )
+        )
+        self.assertIsNone(
+            orchestrator._select_cognition_system3_winner(
+                proposals,
+                [
+                    {"critic_id": "crit_a", "proposal_peer_id": "prop_a", "score": 6},
+                    {"critic_id": "crit_b", "proposal_peer_id": "prop_a", "score": 6},
+                ],
+                "trace-safety",
+            )
+        )
+        winner = orchestrator._select_cognition_system3_winner(
+            proposals,
+            [
+                {"critic_id": "crit_a", "proposal_peer_id": "prop_a", "score": 8},
+                {"critic_id": "crit_b", "proposal_peer_id": "prop_a", "score": 8},
+            ],
+            "trace-approved",
+        )
+        self.assertIsNotNone(winner)
+        self.assertEqual(winner["review_count"], 2)
+        self.assertEqual(winner["safety_threshold"], 7.0)
+        self.assertEqual(winner["review_quorum"], 2)
+
     def test_json_repair_prompt_rejects_wrong_schema_wrappers(self) -> None:
         orchestrator = Orchestrator.__new__(Orchestrator)
 
@@ -663,69 +870,15 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("distill_timeout", logged_events)
         self.assertIn("distill_repair_timeout", logged_events)
 
-    async def test_persist_cognition_distillation_dedupes_catalogs_and_facts(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            orchestrator = Orchestrator()
-            fake_memory = _FakeMemory()
-            orchestrator._memory = fake_memory
-            orchestrator._cognition_skills_path = str(tmp_path / "cognition_skills.json")
-            orchestrator._cognition_patterns_path = str(tmp_path / "cognition_patterns.json")
-            orchestrator._cognition_lessons_path = str(tmp_path / "cognition_lessons.json")
-            orchestrator._cognition_safety_rules_path = str(tmp_path / "cognition_safety_rules.json")
-
-            distillation = {
-                "reusable_skills": [
-                    {
-                        "name": "Map mode architecture",
-                        "description": "Trace router, dispatcher, and execution loops before adding a new mode.",
-                        "when_to_use": ["When changing orchestrator mode behavior"],
-                        "confidence": 0.8,
-                    }
-                ],
-                "memory_facts": [
-                    {
-                        "name": "project.mode.cognition.enabled",
-                        "value": "true",
-                        "confidence": 0.9,
-                    }
-                ],
-                "patterns": [
-                    {
-                        "name": "Think then act then distill",
-                        "description": "Separate thinking, acting, and post-episode distillation.",
-                        "trigger": "Tasks that need reflection plus execution",
-                        "confidence": 0.75,
-                    }
-                ],
-                "failure_lessons": [
-                    {
-                        "lesson": "Do not add a mode only in dispatch; router and session overrides must agree.",
-                        "when": "Introducing a new mode",
-                        "confidence": 0.7,
-                    }
-                ],
-                "safety_rules": [
-                    {
-                        "rule": "Do not treat internal state_of_mind as user-visible by default.",
-                        "rationale": "Inner cognition should stay internal unless explicitly surfaced.",
-                        "confidence": 0.95,
-                    }
-                ],
-            }
-
-            first = await orchestrator._persist_cognition_distillation(distillation, "trace-1")
-            second = await orchestrator._persist_cognition_distillation(distillation, "trace-2")
-
-            self.assertEqual(first, {"skills": 1, "facts": 1, "patterns": 1, "lessons": 1, "safety_rules": 1})
-            self.assertEqual(second, {"skills": 0, "facts": 0, "patterns": 0, "lessons": 0, "safety_rules": 0})
-            self.assertEqual(len(fake_memory.facts), 1)
-            self.assertEqual(len(fake_memory.entities), 4)
-
-            self.assertTrue((tmp_path / "cognition_skills.json").exists())
-            self.assertTrue((tmp_path / "cognition_patterns.json").exists())
-            self.assertTrue((tmp_path / "cognition_lessons.json").exists())
-            self.assertTrue((tmp_path / "cognition_safety_rules.json").exists())
+    async def test_unreviewed_distillation_cannot_write_durable_memory(self) -> None:
+        orchestrator = Orchestrator()
+        fake_memory = _FakeMemory()
+        orchestrator._memory = fake_memory
+        with self.assertRaisesRegex(RuntimeError, "review provisional learning"):
+            await orchestrator._persist_cognition_distillation(
+                {"memory_facts": [{"name": "claim", "value": "unverified", "confidence": 1}]}, "trace")
+        self.assertEqual(fake_memory.facts, [])
+        self.assertEqual(fake_memory.entities, [])
 
     async def test_run_cognition_loop_distills_for_system1_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -744,9 +897,7 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
             orchestrator._generate_cognition_response = AsyncMock(
                 side_effect=[
                     (
-                        "{\"type\":\"init\",\"thought\":\"init\","
-                        "\"query_state\":{\"query_rewrite\":\"analyze mode\",\"intent\":\"analyze\"},"
-                        "\"state_of_mind\":{\"stance\":\"focused\",\"confidence\":0.6}}"
+                        '{"type":"escalate","reason":"requires execution"}'
                     ),
                     "{\"type\":\"route\",\"thinking_mode\":\"system1\",\"reason\":\"direct answer is enough\"}",
                     (
@@ -765,7 +916,7 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(result, "System1 answer")
             orchestrator._distill_cognition_episode.assert_awaited_once()
-            orchestrator._persist_cognition_distillation.assert_awaited_once()
+            orchestrator._persist_cognition_distillation.assert_not_awaited()
 
     async def test_run_cognition_loop_executes_selected_pattern_before_thinking_router(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -821,9 +972,7 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
             orchestrator._generate_cognition_response = AsyncMock(
                 side_effect=[
                     (
-                        "{\"type\":\"init\",\"thought\":\"init\","
-                        "\"query_state\":{\"query_rewrite\":\"what time is it\",\"intent\":\"time_lookup\"},"
-                        "\"state_of_mind\":{\"stance\":\"focused\",\"confidence\":0.8}}"
+                        '{"type":"escalate","reason":"requires execution"}'
                     ),
                     (
                         "{\"type\":\"pattern_route\",\"decision\":\"use\",\"pattern_id\":\"answer_time\","
@@ -876,9 +1025,7 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
             orchestrator._generate_cognition_response = AsyncMock(
                 side_effect=[
                     (
-                        "{\"type\":\"init\",\"thought\":\"init\","
-                        "\"query_state\":{\"query_rewrite\":\"analyze mode\",\"intent\":\"analyze\"},"
-                        "\"state_of_mind\":{\"stance\":\"focused\",\"confidence\":0.6}}"
+                        '{"type":"escalate","reason":"requires execution"}'
                     ),
                     "{\"type\":\"route\",\"thinking_mode\":\"system1\",\"reason\":\"one quick loop is enough\"}",
                     (
@@ -903,13 +1050,15 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
             orchestrator._run_cognition_actions.assert_awaited_once()
             orchestrator._finalize_cognition_result.assert_not_awaited()
             orchestrator._distill_cognition_episode.assert_awaited_once()
-            orchestrator._persist_cognition_distillation.assert_awaited_once()
+            orchestrator._persist_cognition_distillation.assert_not_awaited()
             self.assertEqual(orchestrator._generate_cognition_response.await_count, 4)
 
     async def test_run_cognition_loop_makes_generated_tools_available_next_cycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             orchestrator = Orchestrator()
+            orchestrator._generation_recovery_gate = AsyncMock(return_value=None)
+            orchestrator._cognition_system0_enabled = False
             orchestrator._cognition_query_state_enabled = False
             orchestrator._cognition_state_of_mind_enabled = False
             orchestrator._memory = _FakeRetrievalMemory()
@@ -934,7 +1083,8 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
                         }
                     return None
 
-            orchestrator._tools = _FakeTools()  # type: ignore[assignment]
+            orchestrator._tools = _FakeTools()
+            orchestrator._tools.list_active = lambda: [orchestrator._tools.get_tool("demo.echo")]  # type: ignore[assignment]
             orchestrator.generate_tools_from_spec = AsyncMock(  # type: ignore[method-assign]
                 return_value={
                     "status": "APPROVED",
@@ -979,6 +1129,8 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             orchestrator = Orchestrator()
+            orchestrator._generation_recovery_gate = AsyncMock(return_value=None)
+            orchestrator._cognition_system0_enabled = False
             orchestrator._cognition_query_state_enabled = False
             orchestrator._cognition_state_of_mind_enabled = False
             orchestrator._memory = _FakeRetrievalMemory()
@@ -1003,7 +1155,8 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
                         }
                     return None
 
-            orchestrator._tools = _FakeTools()  # type: ignore[assignment]
+            orchestrator._tools = _FakeTools()
+            orchestrator._tools.list_active = lambda: [orchestrator._tools.get_tool("demo.echo")]  # type: ignore[assignment]
             orchestrator.generate_tools_from_spec = AsyncMock(  # type: ignore[method-assign]
                 return_value={
                     "status": "APPROVED",
@@ -1048,6 +1201,7 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             orchestrator = Orchestrator()
+            orchestrator._cognition_system0_enabled = False
             orchestrator._cognition_query_state_enabled = False
             orchestrator._cognition_state_of_mind_enabled = False
             orchestrator._memory = _FakeRetrievalMemory()
@@ -1081,9 +1235,9 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             orchestrator = Orchestrator()
+            orchestrator._cognition_system0_enabled = False
             orchestrator._cognition_query_state_enabled = False
             orchestrator._cognition_state_of_mind_enabled = False
-            orchestrator._cognition_routing_skip_trivial = False
             orchestrator._cognition_route_model = "route-model"
             orchestrator._cognition_route_options = {"thinking": False, "reasoning_effort": "low"}
             orchestrator._memory = _FakeRetrievalMemory()
@@ -1159,7 +1313,7 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
         )
         candidate_tools = [
             {"tool_id": "ui.screenshot", "tool_bucket": "ui.specialized", "name": "Screenshot"},
-            {"tool_id": "ui.click", "tool_bucket": "ui.duplicate", "name": "Click"},
+            {"tool_id": "ui.click", "tool_bucket": "ui.specialized", "name": "Click"},
             {"tool_id": "sys.time", "name": "Time", "description": "Read the time"},
             {"tool_id": "sys.weather", "name": "Weather", "description": "Read the weather"},
         ]
@@ -1224,7 +1378,7 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
             orchestrator._select_relevant_tools_enabled = True
             orchestrator._tool_selection_category_mode_enabled = True
             orchestrator._cognition_init_controls_tools_needed = False
-            orchestrator._cognition_force_system = "system1"
+            orchestrator._cognition_force_system = "system2"
             orchestrator._memory = _FakeRetrievalMemory()
             orchestrator._retrieve_relevant_tools = AsyncMock(
                 return_value=[
@@ -1274,7 +1428,7 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("AVAILABLE TOOLS:", system1_prompt)
             self.assertIn("fs.mkdir", system1_prompt)
             self.assertIn("fs.write_file", system1_prompt)
-            self.assertNotIn("sys.time", system1_prompt)
+            self.assertNotIn("sys.time", system1_prompt.split("AVAILABLE TOOLS:", 1)[-1])
 
     async def test_init_tools_needed_false_can_drop_selector_results_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1336,6 +1490,7 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             orchestrator = Orchestrator()
+            orchestrator._cognition_system0_enabled = False
             orchestrator._cognition_query_state_enabled = False
             orchestrator._cognition_state_of_mind_enabled = False
             orchestrator._cognition_system3_enabled = True
@@ -1434,15 +1589,12 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(evidence["entity"]["thinking_mode"], "system1")
             self.assertEqual(evidence["entity"]["execution_mode"], "system1")
 
-    async def test_run_cognition_loop_trivial_query_target_system0_skips_init_and_router(self) -> None:
+    async def test_run_cognition_loop_system0_answer_skips_init_and_router(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             orchestrator = Orchestrator()
             orchestrator._cognition_query_state_enabled = True
             orchestrator._cognition_state_of_mind_enabled = False
-            orchestrator._cognition_routing_skip_trivial = True
-            orchestrator._cognition_trivial_query_target = "system0"
-            orchestrator._cognition_distill_trivial_max_chars = 60
             orchestrator._cognition_system0_max_steps = 1
             orchestrator._cognition_system0_model = "system0-model"
             orchestrator._cognition_system0_options = {"thinking": False, "reasoning_effort": "low"}
@@ -1492,6 +1644,7 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             orchestrator = Orchestrator()
+            orchestrator._cognition_system0_enabled = False
             orchestrator._cognition_query_state_enabled = False
             orchestrator._cognition_state_of_mind_enabled = False
             orchestrator._select_relevant_tools_enabled = True
@@ -1538,6 +1691,7 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             orchestrator = Orchestrator()
+            orchestrator._cognition_system0_enabled = False
             orchestrator._cognition_query_state_enabled = False
             orchestrator._cognition_state_of_mind_enabled = False
             orchestrator._retrieve_relevant_tools_enabled = True
@@ -1589,6 +1743,7 @@ class CognitionModeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             orchestrator = Orchestrator()
+            orchestrator._cognition_system0_enabled = False
             orchestrator._cognition_query_state_enabled = False
             orchestrator._cognition_state_of_mind_enabled = False
             orchestrator._retrieve_relevant_tools_enabled = True

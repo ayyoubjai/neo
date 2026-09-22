@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional
+import json
 
 from autonomy.cognition_client import CognitionClient
 from power_process.types import Goal, GoalExecution
@@ -24,9 +25,12 @@ Make concrete progress on this goal by executing the single best next action.
 [GOAL]
 Text: {goal.text}
 Reasoning: {goal.reasoning}
+Success criteria: {goal.success_criteria or goal.text}
+Previous attempts (newest first): {json.dumps(goal.history)}
 
 Rules:
 - Execute the action instead of proposing a plan.
+- Use previous results to choose the next action; do not repeat failed actions unchanged.
 - Prefer the smallest grounded action that can still move the goal forward.
 - You may execute AT MOST {self.max_actions} tool call(s) to achieve this goal.
 - Describe the action that was actually executed and the concrete observation or failure.
@@ -37,6 +41,8 @@ Rules:
             return await self.cognition_client.generate_model(
                 self._build_prompt(goal),
                 GoalExecution,
+                max_actions=self.max_actions,
+                require_evidence=True,
             )
         except Exception as exc:
             return GoalExecution(

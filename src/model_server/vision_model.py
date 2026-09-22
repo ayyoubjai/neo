@@ -10,7 +10,7 @@ from common.llm_json_log import record_llm_json
 from common.record_log import record_event
 from model_server.hf_client import HfError, generate_vision as hf_generate_vision
 from model_server.ollama_client import OllamaError, generate_raw as ollama_generate_raw, provider
-from model_server.llamacpp_client import LlamacppError, generate_raw as llamacpp_generate_raw
+from model_server.llamacpp_client import LlamacppError, generate as llamacpp_generate
 from tool_runtime.sandbox import SandboxViolation, resolve_workspace_path
 
 
@@ -76,7 +76,7 @@ def _coerce_output(
     }
 
 
-def _error_output(image_ref: str, reason: str, raw_output: str = "") -> Dict[str, Any]:
+def _error_output(image_ref: str, reason: str, raw_output: str = "", *, code: str = 'UNKNOWN') -> Dict[str, Any]:
     return {
         "ok": False,
         "image_ref": image_ref,
@@ -86,6 +86,7 @@ def _error_output(image_ref: str, reason: str, raw_output: str = "") -> Dict[str
         "objects": [],
         "raw_output": raw_output,
         "error": reason,
+        "error_code": code,
     }
 
 
@@ -93,7 +94,7 @@ def _analyze_ollama(image_ref: str, question: Optional[str] = None) -> Dict[str,
     settings = load_settings()
     model = settings.models.get("vision_model", "")
     if not model:
-        return _error_output(image_ref, "models.vision_model is empty in settings.")
+        return _error_output(image_ref, "models.vision_model is empty in settings.", code="MISSING_DEPENDENCY")
     vision_timeout = settings.models.get("vision_timeout_s", settings.models.get("ollama_timeout_s", 60))
     enforce_json = bool(settings.models.get("vision_enforce_json", True))
     disable_thinking = bool(settings.models.get("vision_disable_thinking", False))
@@ -102,9 +103,9 @@ def _analyze_ollama(image_ref: str, question: Optional[str] = None) -> Dict[str,
     try:
         raw = _load_image_bytes(image_ref)
     except FileNotFoundError:
-        return _error_output(image_ref, "Image file not found.")
+        return _error_output(image_ref, "Image file not found.", code="MISSING_INPUT")
     except SandboxViolation as e:
-        return _error_output(image_ref, str(e))
+        return _error_output(image_ref, str(e), code="PERMISSION_DENIED")
 
     image_b64 = base64.b64encode(raw).decode("ascii")
     question_text = (question or "").strip()
@@ -183,7 +184,7 @@ def _analyze_ollama(image_ref: str, question: Optional[str] = None) -> Dict[str,
                 "preview": preview,
             },
         )
-        return _error_output(image_ref, f"Vision model returned non-JSON output: {preview}", raw_output)
+        return _error_output(image_ref, f"Vision model returned non-JSON output: {preview}", raw_output, code="INVALID_MODEL_OUTPUT")
     record_llm_json(
         "vision_output",
         {"image_ref": image_ref, "question": question_text, "json": payload},
@@ -203,7 +204,7 @@ def _analyze_llamacpp(image_ref: str, question: Optional[str] = None) -> Dict[st
     settings = load_settings()
     model = settings.models.get("vision_model", "")
     if not model:
-        return _error_output(image_ref, "models.vision_model is empty in settings.")
+        return _error_output(image_ref, "models.vision_model is empty in settings.", code="MISSING_DEPENDENCY")
     vision_timeout = settings.models.get("vision_timeout_s", settings.models.get("llamacpp_timeout_s", 60))
     enforce_json = bool(settings.models.get("vision_enforce_json", True))
     disable_thinking = bool(settings.models.get("vision_disable_thinking", False))
@@ -212,9 +213,9 @@ def _analyze_llamacpp(image_ref: str, question: Optional[str] = None) -> Dict[st
     try:
         raw = _load_image_bytes(image_ref)
     except FileNotFoundError:
-        return _error_output(image_ref, "Image file not found.")
+        return _error_output(image_ref, "Image file not found.", code="MISSING_INPUT")
     except SandboxViolation as e:
-        return _error_output(image_ref, str(e))
+        return _error_output(image_ref, str(e), code="PERMISSION_DENIED")
 
     image_b64 = base64.b64encode(raw).decode("ascii")
     question_text = (question or "").strip()
@@ -241,13 +242,14 @@ def _analyze_llamacpp(image_ref: str, question: Optional[str] = None) -> Dict[st
             model_options[key.strip()] = value
 
     try:
-        resp = llamacpp_generate_raw(
+        raw_output = llamacpp_generate(
             prompt,
             model,
             images=[image_b64],
             options=model_options,
             timeout=vision_timeout,
             response_format="json" if enforce_json else None,
+            use_thinking_on_empty=use_thinking_on_empty,
         )
     except LlamacppError as e:
         log_exception(
@@ -261,11 +263,6 @@ def _analyze_llamacpp(image_ref: str, question: Optional[str] = None) -> Dict[st
             },
         )
         return _error_output(image_ref, f"llamacpp vision request failed: {e}")
-
-    response_text = resp.get("content", "")
-    if not isinstance(response_text, str):
-        response_text = ""
-    raw_output = response_text
 
     payload = _extract_json(raw_output)
     if not payload:
@@ -289,7 +286,7 @@ def _analyze_llamacpp(image_ref: str, question: Optional[str] = None) -> Dict[st
                 "preview": preview,
             },
         )
-        return _error_output(image_ref, f"Vision model returned non-JSON output: {preview}", raw_output)
+        return _error_output(image_ref, f"Vision model returned non-JSON output: {preview}", raw_output, code="INVALID_MODEL_OUTPUT")
     record_llm_json(
         "vision_output",
         {"image_ref": image_ref, "question": question_text, "json": payload},
@@ -309,14 +306,14 @@ def _analyze_hf(image_ref: str, question: Optional[str] = None) -> Dict[str, Any
     settings = load_settings()
     model = settings.models.get("vision_model", "")
     if not model:
-        return _error_output(image_ref, "models.vision_model is empty in settings.")
+        return _error_output(image_ref, "models.vision_model is empty in settings.", code="MISSING_DEPENDENCY")
 
     try:
         raw = _load_image_bytes(image_ref)
     except FileNotFoundError:
-        return _error_output(image_ref, "Image file not found.")
+        return _error_output(image_ref, "Image file not found.", code="MISSING_INPUT")
     except SandboxViolation as e:
-        return _error_output(image_ref, str(e))
+        return _error_output(image_ref, str(e), code="PERMISSION_DENIED")
 
     question_text = (question or "").strip()
     prompt = (
@@ -370,7 +367,7 @@ def _analyze_hf(image_ref: str, question: Optional[str] = None) -> Dict[str, Any
                 "preview": preview,
             },
         )
-        return _error_output(image_ref, f"Vision model returned non-JSON output: {preview}", raw_output)
+        return _error_output(image_ref, f"Vision model returned non-JSON output: {preview}", raw_output, code="INVALID_MODEL_OUTPUT")
     record_llm_json(
         "vision_output",
         {"image_ref": image_ref, "question": question_text, "json": payload},

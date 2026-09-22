@@ -35,8 +35,6 @@ def _settings(workspace_root: str) -> Settings:
             "planner_tool_profile": "default",
             "planner_dynamic_activation_enabled": False,
             "planner_activation_ttl_s": 0.0,
-            "planner_hide_duplicate_ui_tools": True,
-            "planner_show_embodiment_fallback_tools": False,
         },
         search={},
         orchestrator={
@@ -250,6 +248,79 @@ class ToolGenerationPipelineTests(unittest.TestCase):
             self.assertFalse((workspace_root / "data" / "generated_tools.json").exists())
         finally:
             tmpdir.cleanup()
+
+    def test_generated_tools_can_compose_previous_generated_tools(self) -> None:
+        tmpdir, _workspace_root = self._workspace()
+        settings = _settings(tmpdir.name)
+        try:
+            with patch("orchestrator.main.load_settings", return_value=settings), patch(
+                "orchestrator.tool_selector.load_settings",
+                return_value=settings,
+            ):
+                orchestrator = Orchestrator()
+                source = orchestrator._render_generated_tools(
+                    [
+                        {
+                            "tool_id": "demo.inner",
+                            "tier": 0,
+                            "code": "return {'value': 7}, {}",
+                        },
+                        {
+                            "tool_id": "demo.outer",
+                            "tier": 0,
+                            "code": (
+                                "nested, _io = call_tool('demo.inner', {})\n"
+                                "return {'nested': nested}, {}"
+                            ),
+                        },
+                    ]
+                )
+                namespace = {}
+                exec(compile(source, "<generated-tools>", "exec"), namespace)
+                result, io = namespace["demo_outer"]({}, tmpdir.name)
+
+            self.assertEqual(result, {"nested": {"value": 7}})
+            self.assertEqual(io, {})
+        finally:
+            tmpdir.cleanup()
+
+    def test_generated_dependencies_are_installed_before_registration(self) -> None:
+        tmpdir, _workspace_root = self._workspace()
+        settings = _settings(tmpdir.name)
+        try:
+            with patch("orchestrator.main.load_settings", return_value=settings), patch(
+                "orchestrator.tool_selector.load_settings",
+                return_value=settings,
+            ):
+                orchestrator = Orchestrator()
+                with patch("orchestrator.main.subprocess.run") as run:
+                    run.return_value.returncode = 0
+                    run.return_value.stdout = ""
+                    run.return_value.stderr = ""
+                    error = orchestrator._ensure_generated_dependencies(
+                        ["example-package>=1"],
+                        [],
+                        [],
+                    )
+
+            self.assertIsNone(error)
+            command = run.call_args.args[0]
+            self.assertIn("example-package>=1", command)
+            self.assertEqual(command[0], sys.executable)
+        finally:
+            tmpdir.cleanup()
+
+    def test_blacklisted_dependencies_are_not_installed(self) -> None:
+        orchestrator = Orchestrator()
+        with patch("orchestrator.main.subprocess.run") as run:
+            error = orchestrator._ensure_generated_dependencies(
+                ["blocked-package>=1"],
+                ["blocked-package"],
+                [],
+            )
+
+        self.assertIn("Dependency is blacklisted", error or "")
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

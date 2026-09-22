@@ -37,7 +37,7 @@ class JsonUtilsTests(unittest.TestCase):
 class ExplorerTests(unittest.IsolatedAsyncioTestCase):
     async def test_explorer_translates_cognition_output_into_observation(self) -> None:
         class _FakeCognitionClient:
-            async def generate_model(self, prompt, model_cls, *, timeout=60):
+            async def generate_model(self, prompt, model_cls, *, timeout=60, **kwargs):
                 self.prompt = prompt
                 self.timeout = timeout
                 return model_cls(
@@ -69,6 +69,34 @@ class _FakeWorldModel:
         self.recorded_epistemic_observations = []
         self.recorded_goal_executions = []
         self.goal_theory_links = []
+        self.theories = {}
+        self.enrichments = []
+        self.revalidation = None
+
+    def has_observation(self, observation_id):
+        return any(item[1].id == observation_id for item in self.recorded_epistemic_observations) or any(
+            item[1].id == observation_id for item in self.recorded_goal_executions)
+
+    def run_transaction(self, operation):
+        return operation(self)
+
+    def get_theory(self, theory_id):
+        return self.theories.get(theory_id)
+
+    def get_revalidation_theory(self):
+        return self.revalidation
+
+    def enrich_theory(self, theory_id, **kwargs):
+        self.enrichments.append((theory_id, kwargs))
+
+    def get_goal_execution_outcome(self, observation_id):
+        return next((item[2] for item in self.recorded_goal_executions if item[1].id == observation_id), None)
+
+    def get_goal_history(self, goal_id):
+        return []
+
+    def get_theory_context(self, theory_id):
+        return []
 
     def get_untested_theory(self, *, max_attempts=None):
         return None
@@ -80,6 +108,11 @@ class _FakeWorldModel:
 
     def update_theory(self, theory_id: str, new_confidence: float, success: bool) -> None:
         self.updated_theories.append((theory_id, new_confidence, success))
+        if theory_id in self.theories:
+            theory = self.theories[theory_id]
+            theory.confidence_score = new_confidence
+            theory.attempts += 1
+            theory.status = "retired" if new_confidence <= 0 else "active"
 
     def delete_theory(self, theory_id: str) -> None:
         self.deleted_theories.append(theory_id)
@@ -94,6 +127,7 @@ class _FakeWorldModel:
         *,
         deduplicate_pending: bool = True,
         grounding_theory_ids=None,
+        success_criteria="",
     ):
         goal = Goal(id=f"goal-{len(self.added_goals) + 1}", text=text, reasoning=reasoning)
         normalized_grounding = list(grounding_theory_ids or [])
@@ -190,7 +224,7 @@ class MotivatorTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         class _FakeCognitionClient:
-            async def generate_model(self, prompt, model_cls, *, timeout=60):
+            async def generate_model(self, prompt, model_cls, *, timeout=60, **kwargs):
                 return model_cls(goal_text="Inspect the Python entrypoints.", reasoning="Grounded by current theories.")
 
         motivator = Motivator(world_model, cognition_client=_FakeCognitionClient())
@@ -201,13 +235,13 @@ class MotivatorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class EvaluatorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_evaluator_requeues_failed_goal_and_injects_new_theory(self) -> None:
+    async def test_evaluator_requeues_failed_goal_without_promoting_failure_to_belief(self) -> None:
         world_model = _FakeWorldModel()
 
         class _FakeCognitionClient:
-            async def generate_model(self, prompt, model_cls, *, timeout=60):
+            async def generate_model(self, prompt, model_cls, *, timeout=60, **kwargs):
                 return model_cls(
-                    match=False,
+                    completion_score=0.0,
                     reasoning="The action did not finish the task.",
                     new_theory="Writing to protected directories requires elevated permissions.",
                 )
@@ -226,11 +260,7 @@ class EvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.goal_status, "pending")
         self.assertEqual(world_model.goal_status_updates, [("goal-1", "pending")])
         self.assertEqual(world_model.recorded_goal_executions[0][3], "goal-obs-1")
-        self.assertEqual(
-            world_model.added_theories[0][0],
-            "Writing to protected directories requires elevated permissions.",
-        )
-        self.assertEqual(world_model.added_theories[0][2], "goal-obs-1")
+        self.assertEqual(world_model.added_theories, [])
 
 
 class PowerProcessLoopTests(unittest.IsolatedAsyncioTestCase):

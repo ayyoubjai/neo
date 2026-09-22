@@ -30,10 +30,24 @@
       "id": "coding_tools",
       "description": "Repo search and git-oriented tools for coding agents.",
       "paths": [
+        "src/coding_agent/**",
         "src/tool_runtime/**",
+        "src/model_server/**",
+        "src/autonomy/__init__.py",
+        "src/autonomy/cognition_client.py",
+        "src/autonomy/json_utils.py",
+        "src/runtime_core/**",
+        "config/settings.example.json",
+        "config/tool_registry.json",
         "scripts/local_code_agent.py",
+        "scripts/neo_code.py",
+        "scripts/neo-code",
+        "scripts/neo-code.ps1",
+        "scripts/neo-code.cmd",
+        "docs/neo-code.md",
         "tests/test_local_code_agent.py",
-        "tests/test_agi_code_wrapper.py"
+        "tests/test_local_code_agent_loop.py",
+        "tests/test_neo_code_*.py"
       ]
     },
     {
@@ -42,14 +56,6 @@
       "paths": [
         "src/tool_runtime/**",
         "tests/test_google_tools.py"
-      ]
-    },
-    {
-      "id": "phone_tools",
-      "description": "Android/phone embodiment bridge tools.",
-      "paths": [
-        "src/embodiment/**",
-        "tests/test_embodiment_*.py"
       ]
     },
     {
@@ -89,9 +95,10 @@
       ]
     },
     {
-      "id": "llama_swap",
-      "description": "llama-swap config and model entrypoint for multi-model machines.",
+      "id": "llama_router",
+      "description": "llama-router config and model entrypoint for multi-model machines.",
       "paths": [
+        "config/llama-router.local.yaml",
         "config/config.yaml",
         "scripts/adaptive_agent_start_model.py"
       ]

@@ -1,6 +1,6 @@
 Hybrid Voice-First Assistant (MVP)
 
-> For the streamlined local release—llama.cpp/llama-swap, cognition model
+> For the streamlined local release—llama.cpp + llama-router, cognition model
 > selection, Telegram, WhatsApp, voice, vision, and private SearXNG—follow
 > [the core setup guide](docs/release-setup.md). It creates local configuration
 > files and keeps credentials and runtime data out of Git.
@@ -37,6 +37,25 @@ Windows (PowerShell):
 .\scripts\run_all.ps1
 ```
 
+Model server (llama-server)
+- When using the local `llamacpp` provider the project expects a running
+  `llama-server` (router mode). The setup wizard no longer generates a
+  `config/llama-router.local.yaml`; instead the chosen models directory is
+  recorded in `config/settings.local.json` under `models.models_dir`.
+- To start the server manually run:
+
+```bash
+llama-server --models-dir ./models --host 127.0.0.1 --port 8080
+```
+
+- When you run `./start.sh` (or `start.ps1` on Windows), the script will
+  automatically launch `llama-server --models-dir <dir>` for you if
+  `models.provider` is set to `llamacpp` in `config/settings.local.json`.
+  The script will wait for the server health endpoint before continuing.
+
+- The PowerShell helper `start.ps1` provides equivalent behavior on
+  Windows.
+
 Optional autonomy runtime
 - The `epistemic` and `power_process` loops are now available as an opt-in managed service.
 - Configure them under `autonomy` in `config/settings.json`.
@@ -47,11 +66,16 @@ Optional autonomy runtime
 - `autonomy.cognition_timeout_s` controls per-request COGNITION timeout, and `autonomy.permission_policy` controls how autonomy answers tool approval requests when the orchestrator asks.
 - You can also launch it directly with `./scripts/run_autonomy_runtime.sh` or the PowerShell equivalent.
 - Cognition model overrides live under `orchestrator` in `config/settings.json`: `cognition_system1_model` and `cognition_system2_model`.
+- `orchestrator.cognition_system0_enabled` controls the first-pass gate. When `true` (default), System0 may answer simple requests directly; when `false`, normal requests go to the thinking router.
+- `orchestrator.cognition_context_sources` controls pre-cognition context retrieval: `semantic`, `memory`, or `both` (default). The retrieved context is prepared once before System0/router execution and reused after escalation.
+- Each cognition turn runs the `sys.time` tool once and adds its UTC timestamp to every model prompt; if the tool runtime is unavailable, the orchestrator UTC clock is used as a logged fallback.
 - The main thinking router can also use its own override pair: `cognition_route_model` and `cognition_route_options`.
 - Per-slot inference controls live next to those model settings, for example `cognition_system1_options`, `cognition_system2_options`, `cognition_route_options`, `cognition_init_options`, `cognition_repair_options`, `cognition_judge_options`, `final_response_critic_options`, and `tool_codegen_critic_options`.
 - Use `thinking` and `reasoning_effort` inside those option objects when the selected model/provider supports them.
 - System3 has no global model override, but it does have global default options via `cognition_system3_options`; those defaults are merged with each peer's own `options` in `cognition_peer_pools`, with the peer-specific values winning.
 - System3 uses only the per-peer `model` values configured in `cognition_peer_pools`.
+- System3 selects a winner only when its average review score reaches `cognition_system3_safety_threshold` (default 7.0/10) and the proposal has reviews from at least `cognition_system3_review_quorum` distinct critics (default 2); otherwise it falls back without a winner.
+- Cognition now preserves checkpoints across bounded continuation and retries, distinguishes verified outcomes from model-reviewed answers, and quarantines learned artifacts until reviewed. See [cognition reliability](docs/cognition-reliability.md) for acceptance checks, resume, learning review, and System2/System3 evaluation.
 
 Interface mode
 - Primary switch is `interface.mode` in `config/settings.json`.
@@ -171,8 +195,10 @@ Vision sense (YOLO + camera)
 
 Image tool (`image.analyse`)
 - `image.analyse` is the image-analysis tool used by the agent tool runtime.
+- Desktop capture, Linux/Windows dependencies, and Wayland limitations are documented in [Desktop tools](docs/desktop-tools.md).
 
 Model runtime options
+- See [GPU and CPU model placement](docs/model-resources.md) for model swapping, CPU embeddings, and memory settings.
 - Default text generation uses `models.text_model` with optional `models.text_model_options`.
 - Vision analysis uses `models.vision_model` with optional `models.vision_model_options`.
 - UI grounding uses `models.ui_grounding_model` with optional `models.ui_grounding_model_options`.
@@ -211,6 +237,7 @@ Text usage
 - Wake word support uses `config/system_entity.json` (name and aliases). Typing the name/alias alone emits a WakeEvent; typing it as a prefix strips it and sends the remainder.
 
 Tool usage patterns
+- Tool retrieval uses `orchestrator.tool_retrieval_k` as a maximum, not a quota. Only tools with cosine similarity at least `orchestrator.tool_retrieval_min_similarity` are returned (default `0.3`, an initial cutoff to tune for your embedding model). Zero matches is valid. Set the cutoff to `-1.0` to restore unfiltered top-K ranking. `TOOL_RETRIEVAL`, `RETRIEVED_TOOLS`, and `TOP_TOOL_SCORES` in `data/human_record.log` show the decision. On embedding exceptions, a logged fallback supplies at most K active tools without similarity filtering. Disabling retrieval still exposes the active catalog; an independent LLM selector may add tools beyond this retrieval cap.
 - Time: "what time is it"
 - Math: "calc: 2+2"
 - Read: "read workspace:/README.md"
@@ -232,6 +259,7 @@ python3 scripts/generate_tools_from_spec.py --spec path/to/tool_spec.json
   "namespace_prefix": "data.sqlite",
   "max_tools": 3,
   "default_permissions": ["tier1"],
+  "blacklist_libraries": [],
   "constraints": {
     "allow_network": false
   }
@@ -239,59 +267,36 @@ python3 scripts/generate_tools_from_spec.py --spec path/to/tool_spec.json
 ```
 
 - The pipeline plans a tool blueprint first, then runs the existing codegen/critic flow per tool, skips duplicate tool ids idempotently, and persists a JSON run record under `data/tool_generation_runs/`.
+- Generated tools can compose installed tools with `call_tool("tool.id", args)`; nested calls are cycle-checked and cannot exceed the parent permission tier.
+- No code libraries or calls are blocked by default. Add `blacklist_libraries`, `blacklist_modules`, or `blacklist_calls` to a generation spec, or configure `create_tool_blocked_modules` / `create_tool_blocked_calls` globally.
+- Non-standard-library dependencies returned by code generation are installed with the active Python interpreter before registration. Installation failures or blacklisted dependencies abort that tool.
 
-Local coding agent
-- `scripts/local_code_agent.py` is a local Codex-like implementation path. It refreshes the `soul/` mirror, selects relevant code snippets, asks the configured local model for structured `{edits, files}` changes, and stores the generated candidate under `data/local_code_agent/`.
-- From this system repo, it is dry-run by default:
-
-```bash
-python3 scripts/local_code_agent.py "implement the requested change"
-```
-
-- From any target project, use the portable wrapper. It automatically uses the current directory as `--repo-root`:
+Neo Code
+- `scripts/neo-code` runs a persistent inspect → edit → check → continue/repair session with direct local-model or cognition reasoning.
+- From the target project (with this installation's `scripts` directory on `PATH`):
 
 ```bash
-/mnt/c/AGI/scripts/agi-code "implement the requested change"
+neo-code "implement the requested change" --mode cognition --apply \
+  --test-command "python3 -m pytest -q" --max-steps 24
 ```
 
-- Add `/mnt/c/AGI/scripts` to `PATH` to use it as a normal command:
+- Successful checks feed back into the session; completion requires an explicit final response, completed plan milestones, and current verification.
+- `--allow-exec` enables model-selected setup/build commands and managed background servers. `--allow-network` enables the shared runtime's search and HTTP tools. Commands run with your process permissions, without an OS sandbox.
+- Resume using the printed checkpoint path; the plan, transcript, notes, and execution options are retained:
 
 ```bash
-agi-code "implement the requested change"
+neo-code --resume data/neo_code/sessions/<session-id>.json --max-steps 24
 ```
 
-- On Windows PowerShell, use:
-
-```powershell
-C:\AGI\scripts\agi-code.ps1 "implement the requested change"
-```
-
-- Apply the generated candidate and optionally run verification:
-
-```bash
-agi-code "implement the requested change" --apply --test-command "python3 -m unittest tests.test_local_code_agent"
-```
-
-- Use the cognition-backed path when the local orchestrator stack is running:
-
-```bash
-agi-code "implement the requested change" --mode cognition
-```
-
-  This sends the same repo-aware candidate-generation task through COGNITION mode instead of calling `models.text_model` directly. Start the stack first with `scripts/run_all.sh` on Linux/macOS/WSL or `scripts/run_all.ps1` on Windows.
-
-- Useful controls:
-  - `--file path/to/file.py` forces specific files into context.
-  - `--repo-root /path/to/repo` targets another local repository.
-  - `--model name` and `--provider ollama|hf` override `config/settings.json`.
-  - `--no-sync-soul` reuses the existing soul mirror.
-  - `--mode direct|cognition` chooses direct local-model generation or the full local COGNITION path.
-- Safety model: the agent never executes arbitrary model-suggested shell commands. Existing-file edits must match exact substrings, path writes are constrained to the repo root, and repo modification only happens when `--apply` is passed.
+- Without `--apply`, source changes are review-only. Apply the exact reviewed patch with `--candidate path/to/candidate.json --apply --test-command "..."`.
+- Windows launchers: `neo-code.ps1` and `neo-code.cmd`. See [Neo Code usage and architecture](docs/neo-code.md) for tools, permissions, session behavior, and limits.
 
 Google Workspace integration
-- Place a Google installed-app OAuth client JSON at `config/google_client_secret.json` or set `google.client_secrets_path` in `config/settings.json`.
+- Google is disabled for new installations until explicitly enabled. Interactive setup offers `skip`, `neo`, and `own`; see [Google setup and privacy](docs/google-privacy.md).
+- For your own client, use setup's `--google own --google-client-json /path/to/desktop.json`, or set `google.enabled=true` and `google.client_secrets_path` in `config/settings.local.json`. Older installations without an `enabled` setting retain their existing behavior.
 - Authorize one bundle at a time with `google.authorize`.
-- Supported bundles: `gmail_send`, `gmail_readonly`, `calendar_readonly`, `calendar_events`, `docs_readonly`, `docs_edit`.
+- Supported bundles: `gmail_send`, `gmail_compose`, `gmail_readonly`, `calendar_readonly`, `calendar_events`, `docs_readonly`, `docs_edit`.
+- Draft creation requires separate authorization of `gmail_compose`; a `gmail_send` token cannot create drafts. Google's compose scope permits managing drafts and sending mail, so it is not a draft-only permission. Sending through `google.gmail.send_message` continues to use the narrower `gmail_send` bundle.
 - Credentials are stored in the OS keyring, not in the repo.
 - `orchestrator.auto_approve_all=true` allows Google tools to run without confirmation after OAuth is granted; `false` keeps the normal approval flow.
 - `google.auto_google_authorize=true` makes the tool runtime ensure Google authorization during startup. Use `google.auto_google_authorize_bundles` to limit which bundles are auto-authorized; if the list is empty, startup attempts all supported bundles.
@@ -309,8 +314,8 @@ Files of interest
 - evolve/run_evolve.py: generates candidate configs in evolve/candidates/
 - scripts/reflection_dossier.py: builds ranked reflection dossiers from `soul` plus runtime logs
 - scripts/reflection_prepare_candidate.py: prepares an isolated candidate workspace from the top reflection dossier
-- scripts/agi-code, scripts/agi-code.ps1, scripts/agi-code.cmd: portable launchers that run the local coding agent against the current directory
-- scripts/local_code_agent.py: local coding agent that uses `soul` and the configured local model to generate/apply code edits
+- scripts/neo-code, scripts/neo-code.ps1, scripts/neo-code.cmd: portable Neo Code launchers
+- scripts/local_code_agent.py: Neo Code controller using `soul`, persistent sessions, and direct or cognition reasoning
 - scripts/soul_mirror.py: builds and watches the `soul/` analysis mirror with symbol and dependency indexes
 - scripts/train_models.py: trains router/SFT models from logs (writes manifest.json)
 - scripts/package_ollama.py: writes Ollama Modelfile + manifest (optional ollama create)

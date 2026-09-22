@@ -6,7 +6,7 @@ This layer is the first implementation of the DNA/cell idea:
 - `config/adaptive_agent/bundles.json` maps genes to materializable source bundles.
 - `scripts/adaptive_agent_wizard.py` probes the current device, asks for purpose/personality, resolves matching genes, and writes `config/adaptive_agent/active_profile.json`.
 - `scripts/adaptive_agent_dna.py` packs the compressed DNA archive and decodes only the bundles needed by the active profile.
-- `scripts/adaptive_agent_start_model.py` reads the active profile and launches either `llama-server` or `llama-swap`.
+- `scripts/adaptive_agent_start_model.py` reads the active profile and launches `llama-server` in router mode.
 - `scripts/adaptive_agent_entrypoint.py` starts the selected model backend and then runs the normal system startup script.
 
 Run the wizard:
@@ -51,24 +51,24 @@ On Termux, set `LLAMA_CPP_SERVER` if your binary is not named `llama-server`:
 export LLAMA_CPP_SERVER="$HOME/llama.cpp/build/bin/llama-server"
 ```
 
-On stronger machines, the selected service gene uses `llama-swap` by default:
+On stronger machines, the selected service gene uses `llama-router` by default:
 
 ```bash
-llama-swap --config config/config.yaml --listen localhost:8080
+llama-router --config config/llama-router.local.yaml --listen localhost:8080
 ```
 
 Override the binary when needed:
 
 ```bash
-export LLAMA_SWAP_BINARY="/path/to/llama-swap"
+export LLAMA_ROUTER_BINARY="/path/to/llama-router"
 ```
 
 The generated profile deliberately references local GGUF paths such as `models/Qwen3.5-0.8B-Q4_K_M.gguf` or `models/pc-medium.gguf`. Put your GGUF model there or edit `payload.model_path` in the selected model gene.
 
-For weak devices, the model service gene uses one direct `llama-server`. For stronger machines, it uses `llama-swap` with `config/config.yaml`, matching:
+For weak devices, the model service gene uses one direct `llama-server`. For stronger machines, it uses `llama-router` with `config/llama-router.local.yaml`, matching:
 
 ```bash
-llama-swap --config config/config.yaml --listen localhost:8080
+llama-router --config config/llama-router.local.yaml --listen localhost:8080
 ```
 
 The existing system bootstrap now also creates the adaptive profile from the free-form purpose. It infers one of:

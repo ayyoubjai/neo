@@ -6,6 +6,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 
@@ -27,6 +29,7 @@ from tool_runtime.tools import (
     git_log,
     git_status,
     http_request,
+    net_search,
     proc_exec,
     sys_list_tools,
     tool_registry,
@@ -47,8 +50,37 @@ class _FakeHttpResponse:
     def close(self) -> None:
         return
 
+    def __enter__(self) -> "_FakeHttpResponse":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
 
 class GeneralToolTests(unittest.TestCase):
+    def test_search_engine_failures_are_not_successful_empty_results(self) -> None:
+        from tool_runtime.tools import _net_search_searxng, ToolError
+        body = b'{"results": [], "unresponsive_engines": [["brave", "timeout"]]}'
+        with patch("tool_runtime.tools.urllib.request.urlopen", return_value=_FakeHttpResponse(body)):
+            with self.assertRaisesRegex(ToolError, "engine failures.*brave.*timeout"):
+                _net_search_searxng("query", 5, "http://localhost", 10)
+
+    def test_search_preserves_results_when_some_engines_fail(self) -> None:
+        from tool_runtime.tools import _net_search_searxng
+        body = b'{"results": [{"title": "Found", "url": "https://example.com"}], "unresponsive_engines": [["brave", "timeout"]]}'
+        with patch("tool_runtime.tools.urllib.request.urlopen", return_value=_FakeHttpResponse(body)):
+            result = _net_search_searxng("query", 5, "http://localhost", 10)
+        self.assertEqual(result[0]["title"], "Found")
+
+    def test_search_rejects_malformed_payload(self) -> None:
+        from tool_runtime.tools import _net_search_searxng, ToolError
+        for body in [b'[]', b'{}', b'{"results": null}']:
+            with self.subTest(body=body), patch(
+                "tool_runtime.tools.urllib.request.urlopen", return_value=_FakeHttpResponse(body)
+            ):
+                with self.assertRaises(ToolError):
+                    _net_search_searxng("query", 5, "http://localhost", 10)
+
     def test_runtime_tool_registry_contains_general_tools(self) -> None:
         registry = tool_registry()
         self.assertIn("sys.list_tools", registry)
@@ -149,6 +181,48 @@ class GeneralToolTests(unittest.TestCase):
             self.assertEqual(result["saved_to_path"], "workspace:/downloads/echo.json")
             saved = Path(tmpdir) / "downloads" / "echo.json"
             self.assertTrue(saved.exists())
+
+    def test_net_search_uses_configured_safe_search_level(self) -> None:
+        settings = SimpleNamespace(
+            search={
+                "provider": "searxng",
+                "searxng_url": "http://127.0.0.1:8081",
+                "safe_search": 2,
+                "timeout_s": 20,
+            }
+        )
+        response = _FakeHttpResponse(b'{"results": []}')
+        with (
+            patch("tool_runtime.tools.load_settings", return_value=settings),
+            patch("tool_runtime.tools.urllib.request.urlopen", return_value=response) as urlopen,
+        ):
+            result, io = net_search({"query": "security test"}, str(REPO_ROOT))
+
+        request_url = urlopen.call_args.args[0]
+        query = parse_qs(urlsplit(request_url).query)
+        self.assertEqual(query["safesearch"], ["2"])
+        self.assertEqual(result["results"], [])
+        self.assertEqual(io, {})
+
+    def test_net_search_defaults_invalid_safe_search_to_moderate(self) -> None:
+        settings = SimpleNamespace(
+            search={
+                "provider": "searxng",
+                "searxng_url": "http://127.0.0.1:8081",
+                "safe_search": "invalid",
+                "timeout_s": 20,
+            }
+        )
+        response = _FakeHttpResponse(b'{"results": []}')
+        with (
+            patch("tool_runtime.tools.load_settings", return_value=settings),
+            patch("tool_runtime.tools.urllib.request.urlopen", return_value=response) as urlopen,
+        ):
+            net_search({"query": "security test"}, str(REPO_ROOT))
+
+        request_url = urlopen.call_args.args[0]
+        query = parse_qs(urlsplit(request_url).query)
+        self.assertEqual(query["safesearch"], ["1"])
 
     def test_git_tools_report_repo_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

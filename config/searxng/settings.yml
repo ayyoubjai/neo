@@ -14,4 +14,4 @@ server:
   # Do not expose it publicly without a reverse proxy, authentication, and rate limits.
   limiter: false
   public_instance: false
-  image_proxy: false
+  image_proxy: true

@@ -14,6 +14,28 @@ from model_server import llamacpp_client
 
 class LlamacppClientTests(unittest.TestCase):
     @patch("model_server.llamacpp_client._post")
+    def test_generate_raw_forwards_thinking_and_additional_options(self, post):
+        post.return_value = {"choices": [{"message": {"content": "ok"}}]}
+
+        llamacpp_client.generate_raw(
+            "Return JSON.",
+            "model",
+            options={
+                "thinking": False,
+                "reasoning_effort": "low",
+                "reasoning_format": "none",
+                "min_p": 0.1,
+            },
+        )
+
+        _path, payload = post.call_args.args
+        self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertEqual(payload["reasoning_effort"], "low")
+        self.assertEqual(payload["reasoning_format"], "none")
+        self.assertEqual(payload["min_p"], 0.1)
+        self.assertNotIn("thinking", payload)
+
+    @patch("model_server.llamacpp_client._post")
     def test_vision_chat_uses_openai_image_url_content_parts(self, post):
         post.return_value = {"choices": [{"message": {"content": "ok"}}]}
 

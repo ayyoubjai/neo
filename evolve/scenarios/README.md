@@ -18,15 +18,18 @@ Quick flow
    - `macro`: `python3 scripts/evolve_score.py --mode macro --macro-policy auto --target src/model_server/text_model.py --target-start-line 41 --target-end-line 42 --repo-root . --run-dir . --trace-file evolve/scenarios/traces/current.jsonl`
    - `micro`: `python3 scripts/evolve_score.py --mode micro --macro-policy auto --target src/model_server/text_model.py --target-start-line 41 --target-end-line 42 --repo-root . --run-dir . --micro-scenarios-file evolve/scenarios/llm/current.json`
    - `hybrid`: `python3 scripts/evolve_score.py --mode hybrid --macro-policy auto --target src/model_server/text_model.py --target-start-line 41 --target-end-line 42 --repo-root . --run-dir . --trace-file evolve/scenarios/traces/current.jsonl --micro-scenarios-file evolve/scenarios/llm/current.json --macro-weight 0.6 --micro-weight 0.4`
-4. Optional prepare phase (injection + wait for trace accumulation):
+4. Optional prepare phase (micro validation, injection, and wait for trace accumulation):
    - `python3 scripts/evolve_score.py --prepare-only --mode hybrid --macro-policy auto --inject-tracing-if-missing true --trace-collect-window-s 300 --trace-poll-interval-s 5 --target src/model_server/text_model.py --target-start-line 41 --target-end-line 42 --repo-root . --run-dir . --trace-file evolve/scenarios/traces/current.jsonl --min-cases 3`
 
 Notes
 
 - If `--object-ids` is omitted, scripts auto-resolve the smallest enclosing Python object from `--target-start-line/--target-end-line`.
-- `--macro-policy auto` skips macro when target is micro-only (module-level or no-input/no-runtime callable) and returns neutral with `status=macro_skipped`.
+- `--macro-policy auto` skips macro when target is micro-only (module-level or no-input/no-runtime callable). With `--missing-source-policy fail`, that missing evidence is a failure rather than a neutral pass.
 - For class-level instrumentation, you can use `@trace_class_calls("module.ClassName")` to trace constructor/public methods in one place.
 - `--inject-tracing-if-missing true` can auto-inject `trace_calls` / `trace_class_calls` in target source during `--prepare-only`.
+- In micro/hybrid mode, `--prepare-only` also generates scenarios when requested and validates the minimum case count before candidate branches are created.
+- The improvement runner performs preparation in its isolated evolution repository, commits the prepared tree, and creates every candidate from that exact commit.
+- Use target-specific trace/scenario paths (the project profile uses `{target_key}`) so multiple targets cannot reuse one another's evidence.
 - `--trace-collect-window-s` lets the scorer wait while you use the system so trace cases accumulate before scoring.
 - Trace scenarios require `replayable=true` events (JSON-safe args/kwargs).
 - LLM scenarios must contain JSON-safe args/kwargs and use this schema:
